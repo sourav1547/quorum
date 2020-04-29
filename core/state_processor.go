@@ -127,7 +127,61 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 		// if header.Shard > uint64(0) {
 		// 	log.Info("@ds Process Tx ", "s1", s1.IntermediateRoot(false), "s2", s2.IntermediateRoot(false))
 		// }
+	}
+	// Update locked status
+	if p.bc.myshard == uint64(0) {
+		var (
+			txType      uint64
+			index       = 4
+			receipt     *types.Receipt
+			status      bool             // receipt status
+			lockedAddrs []common.Address // locked address of a shard
+			shards      []uint64         // shards involved in a cross shard tx
+			numShard    int
+			shard       uint64
+			sok         bool
+			elemSize    = 32
+		)
+		for i, tx := range block.Transactions() {
+			txType = tx.TxType()
+			receipt = receipts[i]
+			status = receipt.Status == uint64(1)
+			if status && txType == types.StateCommit {
+				shard, _, _ = types.DecodeStateCommit(tx)
 
+				p.bc.lockedAddrMapMu.RLock()
+				lockedAddrs, sok = p.bc.lockedAddrMap[shard]
+				p.bc.lockedAddrMapMu.RUnlock()
+
+				// Continue if the shard do not exists in the lockedAddrMap
+				if !sok || len(lockedAddrs) == 0 {
+					continue
+				}
+
+				p.bc.lockedAddrMu.Lock()
+				for _, addr := range lockedAddrs {
+					delete(p.bc.lockedAddr, addr)
+				}
+				p.bc.lockedAddrMu.Unlock()
+
+				// Unlock all keys of the shard
+				p.bc.lockedAddrMapMu.Lock()
+				delete(p.bc.lockedAddrMap, shard)
+				p.bc.lockedAddrMapMu.Unlock()
+
+			} else if status && txType == types.CrossShard {
+				data := tx.Data()[4:]
+				shards, _ = types.DecodeCrossTx(uint64(0), data)
+				numShard = len(shards)
+				index = (2+1+numShard)*elemSize + elemSize + 2
+				// Fetch all read-write keys of a transaction
+				allKyes, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
+				// Update the global locked keys and lockedAddrMap
+				p.bc.addNewLocks(allKyes)
+			} else {
+				log.Warn("Skipping transaction", "hash", tx.Hash(), "status", status, "type", txType)
+			}
+		}
 	}
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	// s3 := statedb.Copy()

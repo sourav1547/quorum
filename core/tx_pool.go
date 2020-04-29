@@ -243,12 +243,9 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, refAddress 
 		all:         newTxLookup(),
 		chainHeadCh: make(chan ChainHeadEvent, chainHeadChanSize),
 		gasPrice:    new(big.Int).SetUint64(config.PriceLimit),
-		shardAddMap: make(map[uint64]*big.Int),
+		shardAddMap: shardAddMap,
 	}
 
-	for shard, addr := range shardAddMap {
-		pool.shardAddMap[shard] = addr
-	}
 	pool.locals = newAccountSet(pool.signer)
 	for _, addr := range config.Locals {
 		log.Info("Setting new local account", "address", addr)
@@ -577,6 +574,22 @@ func (pool *TxPool) Locals() []common.Address {
 	defer pool.mu.Unlock()
 
 	return pool.locals.flatten()
+}
+
+// Shards retreives the address of each shard
+func (pool *TxPool) Shards() []common.Address {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	var shardAddrs []common.Address
+	for shard, addr := range pool.shardAddMap {
+		if shard == uint64(0) {
+			continue
+		}
+		shardAddrs = append(shardAddrs, common.BigToAddress(addr))
+	}
+	// Skipping the address of the reference shard!
+	return shardAddrs
 }
 
 // local retrieves all currently known local transactions, grouped by origin

@@ -185,12 +185,17 @@ func (st *StateTransition) buyGas() error {
 
 func (st *StateTransition) preCheck() error {
 	// Make sure this transaction's nonce is correct.
-	if st.msg.TxType() == types.ContractInit || st.msg.TxType() == types.CrossShardLocal {
+	txType := st.msg.TxType()
+	if txType == types.ContractInit || txType == types.CrossShardLocal {
 		return st.buyGas()
 	}
 	if st.msg.CheckNonce() {
 		nonce := st.state.GetNonce(st.msg.From())
 		if nonce < st.msg.Nonce() {
+			// Allow state commits with higher nonce i.e., higher block height.
+			if txType == types.StateCommit {
+				return st.buyGas()
+			}
 			return ErrNonceTooHigh
 		} else if nonce > st.msg.Nonce() {
 			return ErrNonceTooLow
@@ -287,7 +292,7 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 					}
 				} else {
 					st.dc.DataCacheMu.RUnlock()
-					log.Error("Address not found in the mentioned list")
+					log.Error("Address not found in the mentioned list", "addr", addr)
 					return nil, 0, false, errKeyNotFound
 				}
 			} else {
