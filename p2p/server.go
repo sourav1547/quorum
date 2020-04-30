@@ -185,16 +185,6 @@ type Server struct {
 	peerOp     chan peerOpFunc
 	peerOpDone chan struct{}
 
-	// @sourav, todo: add api
-	// refPeerOp     chan refPeerOpFunc
-	// refPeerOpDone chan struct{}
-
-	// cousinPeerOp     chan cousinPeerOpFunc
-	// cousinPeerOpDone chan struct{}
-
-	// cousinPeersOp     chan cousinPeersOpFunc
-	// cousinPeersOpDone chan struct{}
-
 	quit          chan struct{}
 	addstatic     chan *enode.Node
 	removestatic  chan *enode.Node
@@ -342,46 +332,6 @@ func (srv *Server) PeerCount() int {
 	}
 	return count
 }
-
-/**
-// @sourav, todo: add apis
-// Retrun the number of reference peers the node is connected with
-func (srv *Server) RefPeerCount() int {
-	var count int
-	select {
-	case srv.refPeerOp <- func(ps map[enode.ID]*Peer) { count = len(ps) }:
-		<-srv.refPeerOpDone
-	case <-srv.quit:
-	}
-	return count
-}
-
-// Retrun the number of cousin peers from a given shard
-func (srv *Server) CousinPeerCount(shard uint64) int {
-	var count int
-	select {
-	case srv.cousinPeerOp <- func(sps map[uint64]*ShardPeers) { count = len(sps[shard].shardPeers) }:
-		<-srv.cousinPeerOpDone
-	case <-srv.quit:
-	}
-	return count
-}
-
-// Return the total number cousin accross all shard
-func (srv *Server) CousinPeersCount() int {
-	var count int
-	select {
-	case srv.cousinPeersOp <- func(sps map[uint64]*ShardPeers) {
-		for _, v := range sps {
-			count = count + len(v.shardPeers)
-		}
-	}:
-		<-srv.cousinPeersOpDone
-	case <-srv.quit:
-	}
-	return count
-}
-**/
 
 // AddPeer connects to the given node and maintains the connection until the
 // server is shut down. If the connection fails for any reason, the server will
@@ -701,9 +651,6 @@ func (srv *Server) run(dialstate dialer) {
 	defer srv.nodedb.Close()
 
 	var (
-		// peers = make(map[enode.ID]*Peer)
-		// @sourav, todo
-		// refPeers     = make(map[enode.ID]*Peer)
 		cousinPeers  = make(map[uint64]map[enode.ID]*Peer)
 		inboundCount = 0
 		trusted      = make(map[enode.ID]bool, len(srv.TrustedNodes))
@@ -803,21 +750,6 @@ running:
 			op(cousinPeers)
 			// op(peers)
 			srv.peerOpDone <- struct{}{}
-		/**
-		// @sourav, todo: add api
-		case rp := <-srv.refPeerOp:
-			// This channel is used by RefPeerCount.
-			rp(refPeers)
-			srv.refPeerOpDone <- struct{}{}
-		case sps := <-srv.cousinPeerOp:
-			// This channel is used to get the number of CousinPeerCount
-			sps(cousinPeers)
-			srv.cousinPeerOpDone <- struct{}{}
-		case tsps := <-srv.cousinPeersOp:
-			// This channel is used to get the number of CousinPeerCountAll
-			tsps(cousinPeers)
-			srv.cousinPeersOpDone <- struct{}{}
-		**/
 		case t := <-taskdone:
 			// A task got done. Tell dialstate about it so it
 			// can update its state and remove it from the active

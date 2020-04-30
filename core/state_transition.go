@@ -186,7 +186,7 @@ func (st *StateTransition) buyGas() error {
 func (st *StateTransition) preCheck() error {
 	// Make sure this transaction's nonce is correct.
 	txType := st.msg.TxType()
-	if txType == types.ContractInit || txType == types.CrossShardLocal {
+	if txType == types.ContractInit || txType == types.CrossShardLocal || txType == types.CrossShard {
 		return st.buyGas()
 	}
 	if st.msg.CheckNonce() {

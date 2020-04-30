@@ -577,25 +577,6 @@ web3._extend({
 	]
 });
 `
-
-/**
-	// @sourav, todo: We have to add an api
-	new web3._extend.Property({
-		name: 'refPeerCount',
-		getter: 'net_refPeerCount'
-	}),
-	new web3._extend.Property({
-		name: 'cousinPeersCount',
-		getter: 'net_cousinPeersCount'
-	}),
-	new web3._extend.Method({
-		name: 'cousinPeerCount',
-		call: 'net_cousinPeerCount',
-		params: 1,
-		inputFormatter: [web3._extend.utils.fromDecimal]
-	}),
-**/
-
 const Personal_JS = `
 web3._extend({
 	property: 'personal',

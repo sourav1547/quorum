@@ -218,7 +218,6 @@ func (c *core) commit() {
 }
 
 // startNewRound starts a new round. if round equals to 0, it means to starts a new sequence
-// @sourav, todo: potential starting point.
 func (c *core) startNewRound(round *big.Int, reorg bool) {
 	var logger log.Logger
 	if c.current == nil {
