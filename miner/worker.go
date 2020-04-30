@@ -1089,7 +1089,15 @@ func (w *worker) commitPendingTransaction(tx *types.Transaction, header *types.H
 		env.state.RevertToSnapshot(snap)
 		env.privateState.RevertToSnapshot(psnap)
 		log.Info("Skipping transaction", "thash", tx.Hash(), "error", err)
-		return nil, err
+
+		// Create a dummy recipt if the transaction failed
+		root := env.state.IntermediateRoot(false)
+		receipt = types.NewReceipt(root.Bytes(), true, header.GasUsed)
+		receipt.TxHash = tx.Hash()
+		receipt.GasUsed = tx.Gas()
+		// Set the receipt logs and create a bloom for filtering
+		receipt.Logs = env.state.GetLogs(tx.Hash())
+		receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
 	}
 
 	env.txs = append(env.txs, tx)
@@ -1776,13 +1784,11 @@ func (w *worker) addNewLocks(allKeys map[uint64][]*types.CKeys) {
 			w.lockedAddrMu.Lock()
 			if _, aok := w.lockedAddr[addr]; !aok {
 				w.lockedAddr[addr] = types.NewCLock(addr)
-				w.lockedAddrMu.Unlock()
 				// Adding address to lockedAddrMap
 				w.lockedAddrMapMu.Lock()
 				w.lockedAddrMap[shard] = append(w.lockedAddrMap[shard], addr)
 				w.lockedAddrMapMu.Unlock()
 			}
-			w.lockedAddrMu.Lock()
 			for _, key := range cKeys.Keys {
 				w.lockedAddr[addr].Keys[key] = false
 			}

@@ -1572,13 +1572,11 @@ func (bc *BlockChain) addNewLocks(allKeys map[uint64][]*types.CKeys) {
 			bc.lockedAddrMu.Lock()
 			if _, aok := bc.lockedAddr[addr]; !aok {
 				bc.lockedAddr[addr] = types.NewCLock(addr)
-				bc.lockedAddrMu.Unlock()
 				// Adding address to lockedAddrMap
 				bc.lockedAddrMapMu.Lock()
 				bc.lockedAddrMap[shard] = append(bc.lockedAddrMap[shard], addr)
 				bc.lockedAddrMapMu.Unlock()
 			}
-			bc.lockedAddrMu.Lock()
 			for _, key := range cKeys.Keys {
 				bc.lockedAddr[addr].Keys[key] = false
 			}
@@ -1731,7 +1729,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 				}
 			}
 		} else {
-			log.Debug("Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
+			log.Info("@ctx, Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
 		}
 	}
 

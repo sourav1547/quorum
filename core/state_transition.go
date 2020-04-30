@@ -285,10 +285,9 @@ func (st *StateTransition) TransitionDb() (ret []byte, usedGas uint64, failed bo
 						if st.dc.Values[addr] == nil {
 							log.Warn("Values in datache is nill for", "addr", addr)
 							return nil, 0, false, errNilValueFound
-						} else {
-							st.dc.Values[addr].Nonce = st.dc.Values[addr].Nonce + uint64(1)
-							st.dc.DataCacheMu.Unlock()
 						}
+						st.dc.Values[addr].Nonce = st.dc.Values[addr].Nonce + uint64(1)
+						st.dc.DataCacheMu.Unlock()
 					}
 				} else {
 					st.dc.DataCacheMu.RUnlock()

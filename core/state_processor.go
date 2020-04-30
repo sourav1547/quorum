@@ -64,6 +64,7 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 		gp       = new(GasPool).AddGas(block.GasLimit())
 		dc       *types.DataCache
 		curr     = start
+		txType   uint64
 
 		privateReceipts types.Receipts
 	)
@@ -73,13 +74,14 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
+		txType = tx.TxType()
 		statedb.Prepare(tx.Hash(), block.Hash(), i)
 		privateState.Prepare(tx.Hash(), block.Hash(), i)
 
 		snap := statedb.Snapshot()
 		psnap := privateState.Snapshot()
 
-		if tx.TxType() != types.CrossShardLocal {
+		if txType != types.CrossShardLocal {
 			dc = nil
 		} else {
 			for curr <= end {
@@ -105,15 +107,25 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 		// s1 := statedb.Copy()
 		receipt, privateReceipt, _, err := ApplyTransaction(p.config, p.bc, nil, gp, dc, statedb, privateState, header, tx, usedGas, cfg)
 		// s2 := statedb.Copy()
-		if tx.TxType() == types.CrossShardLocal && err != nil {
+		if txType == types.CrossShardLocal && err != nil {
 			statedb.RevertToSnapshot(snap)
 			privateState.RevertToSnapshot(psnap)
 			log.Warn("Skipping transaction", "thash", tx.Hash(), "from", tx.From(), "error", err)
-			continue
+
+			// Creating a dummy receipt
+			root := statedb.IntermediateRoot(false)
+			receipt = types.NewReceipt(root.Bytes(), false, *usedGas)
+			receipt.TxHash = tx.Hash()
+			receipt.GasUsed = tx.Gas()
+			// Set the receipt logs and create a bloom for filtering
+			receipt.Logs = statedb.GetLogs(tx.Hash())
+			receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+		} else {
+			if err != nil {
+				return nil, nil, nil, 0, err
+			}
 		}
-		if err != nil {
-			return nil, nil, nil, 0, err
-		}
+
 		receipts = append(receipts, receipt)
 		allLogs = append(allLogs, receipt.Logs...)
 
