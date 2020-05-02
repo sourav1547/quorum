@@ -1767,6 +1767,13 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 			if tx.TxType() != types.CrossShard {
 				continue
 			}
+			w.procCtxsMu.RLock()
+			if _, tok := w.procCtxs[tx.Hash()]; tok {
+				w.procCtxsMu.RUnlock()
+				continue
+			}
+			w.procCtxsMu.RUnlock()
+
 			data = tx.Data()[4:]
 			shards, _ = types.DecodeCrossTx(uint64(0), data) // To remove shard information
 			numShard = len(shards)
