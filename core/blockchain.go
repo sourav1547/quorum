@@ -140,7 +140,7 @@ type BlockChain struct {
 	lastCtx   map[uint64]uint64 // to store whether a shard is touched by a ctx or not
 	lastCtxMu sync.RWMutex      // Lock for lastCtx
 
-	procCtxs   map[common.Hash]*types.Transaction // processed cross shard transaction
+	procCtxs   map[common.Hash]bool // processed cross shard transaction
 	procCtxsMu sync.RWMutex
 
 	db     ethdb.Database // Low level persistent database to store final content in
@@ -196,7 +196,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *ExecResult, refCacheMu, commitLock sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCommitMu sync.RWMutex, lastCtx map[uint64]uint64, lastCtxMu sync.RWMutex, lockedAddrMap map[uint64][]common.Address, lockedAddrMapMu sync.RWMutex, procCtxs map[common.Hash]*types.Transaction, procCtxsMu sync.RWMutex) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *ExecResult, refCacheMu, commitLock sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCommitMu sync.RWMutex, lastCtx map[uint64]uint64, lastCtxMu sync.RWMutex, lockedAddrMap map[uint64][]common.Address, lockedAddrMapMu sync.RWMutex, procCtxs map[common.Hash]bool, procCtxsMu sync.RWMutex) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,

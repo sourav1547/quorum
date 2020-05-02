@@ -165,7 +165,7 @@ var DefaultTxPoolConfig = TxPoolConfig{
 
 	AccountSlots: 16,
 	GlobalSlots:  4096,
-	AccountQueue: 64,
+	AccountQueue: 1024,
 	GlobalQueue:  1024,
 
 	Lifetime: 3 * time.Hour,
@@ -223,7 +223,7 @@ type TxPool struct {
 	priced  *txPricedList                // All transactions sorted by price
 
 	addrShardMap map[common.Address]uint64 // Map of addr to shard
-	procCtxs     map[common.Hash]*types.Transaction
+	procCtxs     map[common.Hash]bool
 	procCtxsMu   sync.RWMutex
 	myshard      uint64
 	leftovers    map[common.Hash]*types.Transaction
@@ -236,7 +236,7 @@ type TxPool struct {
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
 // transactions from the network.
-func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, refAddress common.Address, myshard uint64, shardAddMap map[uint64]*big.Int, chain blockChain, procCtxs map[common.Hash]*types.Transaction, procCtxsMu sync.RWMutex) *TxPool {
+func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, refAddress common.Address, myshard uint64, shardAddMap map[uint64]*big.Int, chain blockChain, procCtxs map[common.Hash]bool, procCtxsMu sync.RWMutex) *TxPool {
 	// Sanitize the input to ensure no vulnerable gas prices are set
 	config = (&config).sanitize()
 
@@ -661,7 +661,7 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return ErrUnderpriced
 	}
 	// Ensure the transaction adheres to nonce ordering
-	if pool.currentState.GetNonce(from) > tx.Nonce() {
+	if pool.currentState.GetNonce(from) > tx.Nonce() && tx.TxType() != types.CrossShard {
 		return ErrNonceTooLow
 	}
 	// Ether value is not currently supported on private transactions
@@ -723,7 +723,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		}
 	} else {
 		// Ensure the transaction adheres to nonce ordering
-		if pool.currentState.GetNonce(from) > tx.Nonce() {
+		if pool.currentState.GetNonce(from) > tx.Nonce() && tx.TxType() != types.CrossShard {
 			return false, ErrNonceTooLow
 		}
 	}
@@ -754,13 +754,6 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	// already validated
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
 		// Nonce already pending, check if required price bump is met
-		pool.procCtxsMu.RLock()
-		if _, tok := pool.procCtxs[tx.Hash()]; tok {
-			pool.procCtxsMu.RUnlock()
-			return false, ErrAlreadyIncluded
-		}
-		pool.procCtxsMu.RUnlock()
-
 		inserted, old := list.Add(tx, pool.config.PriceBump)
 		if !inserted {
 			pendingDiscardCounter.Inc(1)
@@ -1057,25 +1050,27 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 		}
 	}
 	// Iterate over all accounts and promote any executable transactions
-	pool.procCtxsMu.Lock()
-	pool.leftoversMu.Lock()
+
 	for _, addr := range accounts {
 		list := pool.queue[addr]
 		if list == nil {
 			continue // Just in case someone calls with a non existing account
 		}
 		_, scommit := pool.addrShardMap[addr]
-
 		// Drop all transactions that are deemed too old (low nonce)
 		for _, tx := range list.Forward(pool.currentState.GetNonce(addr)) {
 			hash := tx.Hash()
 			log.Trace("Removed old queued transaction", "hash", hash)
 			if !scommit && ref {
+				pool.procCtxsMu.Lock()
+				pool.leftoversMu.Lock()
 				if _, hok := pool.procCtxs[hash]; !hok {
 					pool.leftovers[hash] = tx
 				} else {
 					delete(pool.leftovers, hash)
 				}
+				pool.leftoversMu.Unlock()
+				pool.procCtxsMu.Unlock()
 			}
 			pool.all.Remove(hash)
 			pool.priced.Removed()
@@ -1087,11 +1082,15 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 				hash := tx.Hash()
 				log.Trace("Removed unpayable queued transaction", "hash", hash)
 				if !scommit && ref {
+					pool.procCtxsMu.RLock()
+					pool.leftoversMu.Lock()
 					if _, hok := pool.procCtxs[hash]; !hok {
 						pool.leftovers[hash] = tx
 					} else {
 						delete(pool.leftovers, hash)
 					}
+					pool.leftoversMu.Unlock()
+					pool.procCtxsMu.RUnlock()
 				}
 				pool.all.Remove(hash)
 				pool.priced.Removed()
@@ -1112,12 +1111,10 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 		// Gather all executable transactions and promote them
 		for _, tx := range list.Ready(pool.pendingState.GetNonce(addr)) {
 			hash := tx.Hash()
-			if _, tok := pool.procCtxs[hash]; !tok {
+			log.Trace("Promoting queued transaction", "hash", hash)
+			if pool.promoteTx(addr, hash, tx) {
 				log.Trace("Promoting queued transaction", "hash", hash)
-				if pool.promoteTx(addr, hash, tx) {
-					log.Trace("Promoting queued transaction", "hash", hash)
-					promoted = append(promoted, tx)
-				}
+				promoted = append(promoted, tx)
 			}
 		}
 		// Drop all transactions over the allowed limit
@@ -1135,9 +1132,6 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			delete(pool.queue, addr)
 		}
 	}
-	pool.leftoversMu.Unlock()
-	pool.procCtxsMu.Unlock()
-
 	// Notify subsystem for new promoted transactions.
 	if len(promoted) > 0 {
 		go pool.txFeed.Send(NewTxsEvent{promoted})
@@ -1260,9 +1254,6 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 // are moved back into the future queue.
 func (pool *TxPool) demoteUnexecutables() {
 	var ref = pool.myshard == uint64(0)
-	pool.procCtxsMu.Lock()
-	defer pool.procCtxsMu.Unlock()
-	pool.leftoversMu.Lock()
 	// Iterate over all accounts and demote any non-executable transactions
 	for addr, list := range pool.pending {
 		nonce := pool.currentState.GetNonce(addr)
@@ -1273,11 +1264,15 @@ func (pool *TxPool) demoteUnexecutables() {
 			hash := tx.Hash()
 			log.Trace("Removed old pending transaction", "hash", hash)
 			if !scommit && ref {
+				pool.procCtxsMu.RLock()
+				pool.leftoversMu.Lock()
 				if _, hok := pool.procCtxs[hash]; !hok {
 					pool.leftovers[hash] = tx
 				} else {
 					delete(pool.leftovers, hash)
 				}
+				pool.leftoversMu.Unlock()
+				pool.procCtxsMu.RUnlock()
 			}
 			pool.all.Remove(hash)
 			pool.priced.Removed()
@@ -1288,11 +1283,15 @@ func (pool *TxPool) demoteUnexecutables() {
 			hash := tx.Hash()
 			log.Trace("Removed unpayable pending transaction", "hash", hash)
 			if !scommit && ref {
+				pool.procCtxsMu.RLock()
+				pool.leftoversMu.Lock()
 				if _, hok := pool.procCtxs[hash]; !hok {
 					pool.leftovers[hash] = tx
 				} else {
 					delete(pool.leftovers, hash)
 				}
+				pool.leftoversMu.Unlock()
+				pool.procCtxsMu.RUnlock()
 			}
 			pool.all.Remove(hash)
 			pool.priced.Removed()
@@ -1317,7 +1316,6 @@ func (pool *TxPool) demoteUnexecutables() {
 			delete(pool.beats, addr)
 		}
 	}
-	pool.leftoversMu.Unlock()
 }
 
 // addressByHeartbeat is an account address tagged with its last activity timestamp.

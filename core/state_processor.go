@@ -195,7 +195,7 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 			}
 			if txType == types.CrossShard {
 				p.bc.procCtxsMu.Lock()
-				p.bc.procCtxs[tx.Hash()] = tx
+				p.bc.procCtxs[tx.Hash()] = false
 				p.bc.procCtxsMu.Unlock()
 			}
 		}

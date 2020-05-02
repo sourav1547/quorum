@@ -97,52 +97,6 @@ func (m *txSortedMap) Forward(threshold uint64) types.Transactions {
 	return removed
 }
 
-// DeleteCtx removes the transaction with particular hash
-func (m *txSortedMap) ForwardCtxs(threshold uint64, tHashs map[common.Hash]*types.Transaction) types.Transactions {
-	var (
-		ready   types.Transactions
-		removed types.Transactions
-	)
-	for m.index.Len() > 0 && (*m.index)[0] < threshold {
-		nonce := heap.Pop(m.index).(uint64)
-		tx := m.items[nonce]
-		if _, tok := tHashs[tx.Hash()]; !tok {
-			ready = append(ready, tx)
-		} else {
-			removed = append(removed, tx)
-		}
-		delete(m.items, nonce)
-	}
-
-	// Find every removed transaction and delete it from cache
-	// @sourav, todo: optimize the following!
-	if m.cache != nil {
-		for _, tx := range removed {
-			for i, mtx := range m.cache {
-				if tx.Hash() == mtx.Hash() {
-					mlen := len(m.cache)
-					copy(m.cache[i:], m.cache[i+1:])
-					m.cache[mlen-1] = nil
-					m.cache = m.cache[:mlen-1]
-					break
-				}
-			}
-		}
-		for _, tx := range ready {
-			for i, mtx := range m.cache {
-				if tx.Hash() == mtx.Hash() {
-					mlen := len(m.cache)
-					copy(m.cache[i:], m.cache[i+1:])
-					m.cache[mlen-1] = nil
-					m.cache = m.cache[:mlen-1]
-					break
-				}
-			}
-		}
-	}
-	return ready
-}
-
 // Filter iterates over the list of transactions and removes all of them for which
 // the specified function evaluates to true.
 func (m *txSortedMap) Filter(filter func(*types.Transaction) bool) types.Transactions {
@@ -322,11 +276,6 @@ func (l *txList) Add(tx *types.Transaction, priceBump uint64) (bool, *types.Tran
 // maintenance.
 func (l *txList) Forward(threshold uint64) types.Transactions {
 	return l.txs.Forward(threshold)
-}
-
-// DeleteCtx removes a specific cross-shard transaction from the list
-func (l *txList) ForwardCtxs(threshold uint64, tHashes map[common.Hash]*types.Transaction) types.Transactions {
-	return l.txs.ForwardCtxs(threshold, tHashes)
 }
 
 // Filter removes all transactions from the list with a cost or gas limit higher

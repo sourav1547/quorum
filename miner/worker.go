@@ -179,7 +179,7 @@ type worker struct {
 	lastCtx   map[uint64]uint64 // to store whether a shard is touched by a ctx or not
 	lastCtxMu sync.RWMutex      // Lock for lastCtxMu
 
-	procCtxs   map[common.Hash]*types.Transaction
+	procCtxs   map[common.Hash]bool
 	procCtxsMu sync.RWMutex
 
 	foreignDataCh   chan core.ForeignDataEvent
@@ -246,7 +246,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCommitMu sync.RWMutex, lastCtx map[uint64]uint64, lastCtxMu sync.RWMutex, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64][]common.Address, lockedAddrMapMu sync.RWMutex, procCtxs map[common.Hash]*types.Transaction, procCtxsMu sync.RWMutex) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCommitMu sync.RWMutex, lastCtx map[uint64]uint64, lastCtxMu sync.RWMutex, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64][]common.Address, lockedAddrMapMu sync.RWMutex, procCtxs map[common.Hash]bool, procCtxsMu sync.RWMutex) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -895,7 +895,7 @@ func (w *worker) resultLoop() {
 
 					if txType == types.CrossShard {
 						w.procCtxsMu.Lock()
-						w.procCtxs[tx.Hash()] = tx
+						w.procCtxs[tx.Hash()] = false
 						w.procCtxsMu.Unlock()
 					}
 				}

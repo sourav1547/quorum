@@ -91,8 +91,8 @@ type Ethereum struct {
 	lastCtx   map[uint64]uint64 // to store whether a shard is touched by a ctx or not
 	lastCtxMu sync.RWMutex      // Lock for lastCtx
 
-	procCtxs   map[common.Hash]*types.Transaction // To store hashes of processed cross-shard transactions
-	procCtxsMu sync.RWMutex                       // Lock of procCtxs
+	procCtxs   map[common.Hash]bool // To store hashes of processed cross-shard transactions
+	procCtxsMu sync.RWMutex         // Lock of procCtxs
 
 	refCache   *core.ExecResult
 	refCacheMu sync.RWMutex
@@ -221,7 +221,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		foreignData:     make(map[uint64]*types.DataCache),
 		lockedAddr:      make(map[common.Address]*types.CLock),
 		lastCtx:         make(map[uint64]uint64),
-		procCtxs:        make(map[common.Hash]*types.Transaction),
+		procCtxs:        make(map[common.Hash]bool),
 		lastCommit:      make(map[uint64]*types.Commitment),
 		lockedAddrMap:   make(map[uint64][]common.Address),
 	}
