@@ -140,6 +140,9 @@ type BlockChain struct {
 	lastCtx   map[uint64]uint64 // to store whether a shard is touched by a ctx or not
 	lastCtxMu sync.RWMutex      // Lock for lastCtx
 
+	procCtxs   map[common.Hash]*types.Transaction // processed cross shard transaction
+	procCtxsMu sync.RWMutex
+
 	db     ethdb.Database // Low level persistent database to store final content in
 	triegc *prque.Prque   // Priority queue mapping block numbers to tries to gc
 	gcproc time.Duration  // Accumulates canonical block processing for trie dumping
@@ -193,7 +196,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *ExecResult, refCacheMu, commitLock sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCommitMu sync.RWMutex, lastCtx map[uint64]uint64, lastCtxMu sync.RWMutex, lockedAddrMap map[uint64][]common.Address, lockedAddrMapMu sync.RWMutex) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *ExecResult, refCacheMu, commitLock sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCommitMu sync.RWMutex, lastCtx map[uint64]uint64, lastCtxMu sync.RWMutex, lockedAddrMap map[uint64][]common.Address, lockedAddrMapMu sync.RWMutex, procCtxs map[common.Hash]*types.Transaction, procCtxsMu sync.RWMutex) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -242,6 +245,8 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		lastCommitMu:      lastCommitMu,
 		lastCtx:           lastCtx,
 		lastCtxMu:         lastCtxMu,
+		procCtxs:          procCtxs,
+		procCtxsMu:        procCtxsMu,
 		lockedAddrMap:     lockedAddrMap,
 		lockedAddrMapMu:   lockedAddrMapMu,
 	}
@@ -1526,7 +1531,8 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 				}
 			}
 
-			// Update the reference status of each shard!
+			// Update the reference status of shards i.e., update which shards committed
+			// new block and for which shard new cross-shard transactions were added!
 			if bc.myshard == uint64(0) {
 				bc.UpdateRefStatus(block, receipts)
 			}
@@ -1601,6 +1607,7 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 		receipt = receipts[i]
 		rStatus = receipt.Status == uint64(1)
 		txType = tx.TxType()
+
 		tStatus = false
 		if rStatus && receipt.Logs != nil {
 			if txType == types.CrossShard || txType == types.StateCommit {
@@ -1729,7 +1736,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 				}
 			}
 		} else {
-			log.Info("@ctx, Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
+			log.Info("Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
 		}
 	}
 

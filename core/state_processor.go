@@ -193,6 +193,11 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 			} else {
 				log.Warn("Skipping transaction", "hash", tx.Hash(), "status", status, "type", txType)
 			}
+			if txType == types.CrossShard {
+				p.bc.procCtxsMu.Lock()
+				p.bc.procCtxs[tx.Hash()] = tx
+				p.bc.procCtxsMu.Unlock()
+			}
 		}
 	}
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)

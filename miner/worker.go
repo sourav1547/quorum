@@ -179,6 +179,9 @@ type worker struct {
 	lastCtx   map[uint64]uint64 // to store whether a shard is touched by a ctx or not
 	lastCtxMu sync.RWMutex      // Lock for lastCtxMu
 
+	procCtxs   map[common.Hash]*types.Transaction
+	procCtxsMu sync.RWMutex
+
 	foreignDataCh   chan core.ForeignDataEvent
 	foreignDataSub  event.Subscription
 	crossWorkCh     chan struct{}
@@ -243,7 +246,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCommitMu sync.RWMutex, lastCtx map[uint64]uint64, lastCtxMu sync.RWMutex, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64][]common.Address, lockedAddrMapMu sync.RWMutex) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCommitMu sync.RWMutex, lastCtx map[uint64]uint64, lastCtxMu sync.RWMutex, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64][]common.Address, lockedAddrMapMu sync.RWMutex, procCtxs map[common.Hash]*types.Transaction, procCtxsMu sync.RWMutex) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -293,6 +296,8 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		pendingResultCh:    make(chan struct{}),
 		stopProcessCh:      make(chan struct{}),
 		addrShardMap:       make(map[common.Address]uint64),
+		procCtxs:           procCtxs,
+		procCtxsMu:         procCtxsMu,
 	}
 	if _, ok := engine.(consensus.Istanbul); ok || !config.IsQuorum || config.Clique != nil {
 		// Subscribe NewTxsEvent for tx pool
@@ -882,8 +887,16 @@ func (w *worker) resultLoop() {
 						allKyes, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
 						// Update the global locked keys and lockedAddrMap
 						w.addNewLocks(allKyes)
+						// Independent of the execution status of a cross-shard transaction, mark it
+						// as processed!
 					} else {
 						log.Warn("Skipping transaction", "hash", tx.Hash(), "status", status, "type", txType)
+					}
+
+					if txType == types.CrossShard {
+						w.procCtxsMu.Lock()
+						w.procCtxs[tx.Hash()] = tx
+						w.procCtxsMu.Unlock()
 					}
 				}
 			}
@@ -1705,15 +1718,14 @@ func (w *worker) NewValidStateCommitments(stateTxs map[common.Address]types.Tran
 	}
 	return newCommits
 }
-
 func (w *worker) UnlockKeys(shard uint64) {
 	var (
 		lockedAddrs []common.Address
 		keys        map[common.Hash]bool
 	)
 	w.lockedAddrMapMu.Lock()
-	defer w.lockedAddrMapMu.Unlock()
 	lockedAddrs = w.lockedAddrMap[shard] // list of currently locked address of a shard
+	w.lockedAddrMapMu.Unlock()
 	// If no locked address for a particular shard, then return
 	if len(lockedAddrs) == 0 {
 		return
@@ -1726,10 +1738,12 @@ func (w *worker) UnlockKeys(shard uint64) {
 			w.cUnlockedAddr[addr] = types.NewCLock(addr)
 		}
 		// Extract the keys and unlock them
+		w.lockedAddrMu.RLock()
 		keys = w.lockedAddr[addr].Keys
 		for key := range keys {
 			w.cUnlockedAddr[addr].Keys[key] = false
 		}
+		w.lockedAddrMu.RUnlock()
 		w.cUnlockedAddrMu.Unlock()
 	}
 }
@@ -1750,7 +1764,7 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 		start += len(txs)
 		for _, tx := range txs {
 			// If the transaction is not cross-shard
-			if tx.TxType != types.CrossShard {
+			if tx.TxType() != types.CrossShard {
 				continue
 			}
 			data = tx.Data()[4:]
@@ -1856,7 +1870,7 @@ func (w *worker) checkTxStatus(allKeys map[uint64][]*types.CKeys) bool {
 		// for every contract
 		for _, cKeys := range sKeys {
 			if w.checkLockStatus(cKeys.Addr, cKeys.Keys) {
-				log.Info("@ctx, already locked", "addr", cKeys.Addr)
+				log.Debug("@ctx, already locked", "addr", cKeys.Addr)
 				return false
 			}
 		}
@@ -1874,7 +1888,7 @@ func (w *worker) checkLockStatus(addr common.Address, addrKeys []common.Hash) bo
 
 	// Contract not locked
 	if !galok && !calok {
-		log.Info("@ctx, returning false !galok && !calok")
+		log.Debug("@ctx, returning false !galok && !calok")
 		return false
 	}
 
@@ -1883,7 +1897,7 @@ func (w *worker) checkLockStatus(addr common.Address, addrKeys []common.Hash) bo
 		cLockedKeys := w.cLockedAddr[addr].Keys
 		for _, key := range addrKeys {
 			if _, cok := cLockedKeys[key]; cok {
-				log.Info("@ctx, already locked calock", "addr", addr, "key", key)
+				log.Debug("@ctx, already locked calock", "addr", addr, "key", key)
 				return true
 			}
 		}
@@ -1907,7 +1921,7 @@ func (w *worker) checkLockStatus(addr common.Address, addrKeys []common.Hash) bo
 				_, gok := gLockedKeys[key]
 				_, uok := unlockedKeys[key]
 				if gok && !uok {
-					log.Info("@ctx, already locked galok", "addr", addr, "key", key)
+					log.Debug("@ctx, already locked galok", "addr", addr, "key", key)
 					return true
 				}
 			}
@@ -1917,7 +1931,7 @@ func (w *worker) checkLockStatus(addr common.Address, addrKeys []common.Hash) bo
 		// keys not unlocked locally
 		for _, key := range addrKeys {
 			if _, gok := gLockedKeys[key]; gok {
-				log.Info("@ctx, already locked no auok", "addr", addr, "key", key)
+				log.Debug("@ctx, already locked no auok", "addr", addr, "key", key)
 				return true
 			}
 		}
