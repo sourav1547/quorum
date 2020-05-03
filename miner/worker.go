@@ -892,7 +892,6 @@ func (w *worker) resultLoop() {
 					} else {
 						log.Warn("Skipping transaction", "hash", tx.Hash(), "status", status, "type", txType)
 					}
-
 					if txType == types.CrossShard {
 						w.procCtxsMu.Lock()
 						w.procCtxs[tx.Hash()] = false
