@@ -616,6 +616,8 @@ func (evm *EVM) ChainConfig() *params.ChainConfig { return evm.chainConfig }
 
 func getBalance(env *EVM, addr common.Address) (*big.Int, error) {
 	if env.dc != nil {
+		env.dc.DataCacheMu.RLock()
+		defer env.dc.DataCacheMu.RUnlock()
 		var (
 			shard uint64
 			sok   bool
@@ -649,6 +651,8 @@ func getBalance(env *EVM, addr common.Address) (*big.Int, error) {
 
 func setState(env *EVM, addr common.Address, loc, val common.Hash) error {
 	if env.dc != nil {
+		env.dc.DataCacheMu.RLock()
+		defer env.dc.DataCacheMu.RUnlock()
 		var (
 			shard uint64
 			sok   bool
@@ -681,6 +685,8 @@ func setState(env *EVM, addr common.Address, loc, val common.Hash) error {
 
 func getStateAt(env *EVM, addr common.Address, loc common.Hash) (common.Hash, error) {
 	if env.dc != nil {
+		env.dc.DataCacheMu.RLock()
+		defer env.dc.DataCacheMu.RUnlock()
 		var (
 			shard uint64
 			sok   bool

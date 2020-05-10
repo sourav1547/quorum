@@ -134,7 +134,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 	manager := &ProtocolManager{
 		numShard:      numShard,
 		myshard:       myshard,
-		stateGasLimit: uint64(500000),
+		stateGasLimit: uint64(80000),
 		stateGasPrice: big.NewInt(0),
 		networkID:     networkID,
 		eventMux:      mux,

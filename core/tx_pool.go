@@ -123,6 +123,7 @@ const (
 // blockChain provides the state of blockchain and current gas limit to do
 // some pre checks in tx pool and event subscribers.
 type blockChain interface {
+	IsProcessed(common.Hash) bool
 	CurrentBlock() *types.Block
 	GetBlock(hash common.Hash, number uint64) *types.Block
 	StateAt(root common.Hash) (*state.StateDB, *state.StateDB, error)
@@ -163,10 +164,10 @@ var DefaultTxPoolConfig = TxPoolConfig{
 	PriceLimit: 1,
 	PriceBump:  10,
 
-	AccountSlots: 16,
-	GlobalSlots:  4096,
-	AccountQueue: 1024,
-	GlobalQueue:  1024,
+	AccountSlots: 100 * 8192,
+	GlobalSlots:  100 * 8192,
+	AccountQueue: 100 * 8192,
+	GlobalQueue:  100 * 8192,
 
 	Lifetime: 3 * time.Hour,
 }
@@ -223,11 +224,9 @@ type TxPool struct {
 	priced  *txPricedList                // All transactions sorted by price
 
 	addrShardMap map[common.Address]uint64 // Map of addr to shard
-	procCtxs     map[common.Hash]bool
-	procCtxsMu   sync.RWMutex
 	myshard      uint64
-	leftovers    map[common.Hash]*types.Transaction
 	leftoversMu  sync.RWMutex
+	leftovers    map[common.Hash]*types.Transaction
 
 	wg sync.WaitGroup // for shutdown sync
 
@@ -236,7 +235,7 @@ type TxPool struct {
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
 // transactions from the network.
-func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, refAddress common.Address, myshard uint64, shardAddMap map[uint64]*big.Int, chain blockChain, procCtxs map[common.Hash]bool, procCtxsMu sync.RWMutex) *TxPool {
+func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, refAddress common.Address, myshard uint64, shardAddMap map[uint64]*big.Int, chain blockChain) *TxPool {
 	// Sanitize the input to ensure no vulnerable gas prices are set
 	config = (&config).sanitize()
 
@@ -254,8 +253,6 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, refAddress 
 		gasPrice:     new(big.Int).SetUint64(config.PriceLimit),
 		addrShardMap: make(map[common.Address]uint64),
 		myshard:      myshard,
-		procCtxs:     procCtxs,
-		procCtxsMu:   procCtxsMu,
 		leftovers:    make(map[common.Hash]*types.Transaction),
 	}
 
@@ -703,9 +700,6 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	// If the transaction is already known, discard it
 	hash := tx.Hash()
 	if pool.all.Get(hash) != nil {
-		if tx.TxType() == uint64(2) {
-			log.Info("Discarding already known transaction", "hash", hash)
-		}
 		log.Trace("Discarding already known transaction", "hash", hash)
 		return false, fmt.Errorf("known transaction: %x", hash)
 	}
@@ -714,9 +708,6 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	if tx.TxType() != types.StateCommit {
 		// If the transaction fails basic validation, discard it
 		if err := pool.validateTx(tx, local); err != nil {
-			if tx.TxType() != uint64(2) {
-				log.Info("Discarding invalid transaction", "hash", hash, "err", err)
-			}
 			log.Trace("Discarding invalid transaction", "hash", hash, "err", err)
 			invalidTxCounter.Inc(1)
 			return false, err
@@ -732,9 +723,6 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	if uint64(pool.all.Count()) >= pool.config.GlobalSlots+pool.config.GlobalQueue {
 		// If the new transaction is underpriced, don't accept it
 		if !pool.chainconfig.IsQuorum && !local && pool.priced.Underpriced(tx, pool.locals) {
-			if tx.TxType() == uint64(2) {
-				log.Info("Discarding underpriced transaction", "hash", hash, "price", tx.GasPrice())
-			}
 			log.Trace("Discarding underpriced transaction", "hash", hash, "price", tx.GasPrice())
 			underpricedTxCounter.Inc(1)
 			return false, ErrUnderpriced
@@ -742,9 +730,6 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		// New transaction is better than our worse ones, make room for it
 		drop := pool.priced.Discard(pool.all.Count()-int(pool.config.GlobalSlots+pool.config.GlobalQueue-1), pool.locals)
 		for _, tx := range drop {
-			if tx.TxType() == uint64(2) {
-				log.Info("Discarding freshly underpriced transaction", "hash", tx.Hash(), "price", tx.GasPrice())
-			}
 			log.Trace("Discarding freshly underpriced transaction", "hash", tx.Hash(), "price", tx.GasPrice())
 			underpricedTxCounter.Inc(1)
 			pool.removeTx(tx.Hash(), false)
@@ -769,9 +754,6 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		pool.priced.Put(tx)
 		pool.journalTx(from, tx)
 
-		if tx.TxType() == uint64(2) {
-			log.Info("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
-		}
 		log.Trace("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
 
 		// We've directly injected a replacement transaction, notify subsystems
@@ -792,10 +774,6 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		}
 	}
 	pool.journalTx(from, tx)
-
-	if tx.TxType() == uint64(2) {
-		log.Info("Pooled new future transaction", "hash", hash, "from", from, "to", tx.To())
-	}
 	log.Trace("Pooled new future transaction", "hash", hash, "from", from, "to", tx.To())
 	return replace, nil
 }
@@ -806,15 +784,29 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, error) {
 	// Try to insert the transaction into the future queue
 	from, _ := types.Sender(pool.signer, tx) // already validated
+	txType := tx.TxType()
 	if pool.queue[from] == nil {
-		if tx.TxType() == 0 {
-			pool.queue[from] = newTxList(true)
-		} else {
-			pool.queue[from] = newTxList(false)
-		}
+		pool.queue[from] = newTxList(true)
 	}
-	inserted, old := pool.queue[from].Add(tx, pool.config.PriceBump)
+	if pool.pending[from] == nil {
+		pool.pending[from] = newTxList(true)
+	}
+
+	var (
+		inserted bool
+		old      *types.Transaction
+	)
+	if txType == types.CrossShard {
+		inserted, old = pool.pending[from].Add(tx, pool.config.PriceBump)
+		go pool.txFeed.Send(NewTxsEvent{types.Transactions{tx}})
+	} else {
+		inserted, old = pool.queue[from].Add(tx, pool.config.PriceBump)
+	}
+	// inserted, old := pool.queue[from].Add(tx, pool.config.PriceBump)
 	if !inserted {
+		if txType == types.CrossShard {
+			log.Info("@txs Cross shard trasanction not inserted", "hash", tx.Hash(), "nonce", tx.Nonce())
+		}
 		// An older transaction was better, discard this
 		queuedDiscardCounter.Inc(1)
 		return false, ErrReplaceUnderpriced
@@ -1050,7 +1042,8 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 		}
 	}
 	// Iterate over all accounts and promote any executable transactions
-
+	pool.leftoversMu.Lock()
+	defer pool.leftoversMu.Unlock()
 	for _, addr := range accounts {
 		list := pool.queue[addr]
 		if list == nil {
@@ -1062,19 +1055,16 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			hash := tx.Hash()
 			log.Trace("Removed old queued transaction", "hash", hash)
 			if !scommit && ref {
-				pool.procCtxsMu.Lock()
-				pool.leftoversMu.Lock()
-				if _, hok := pool.procCtxs[hash]; !hok {
+				if pool.chain.IsProcessed(hash) {
 					pool.leftovers[hash] = tx
 				} else {
 					delete(pool.leftovers, hash)
 				}
-				pool.leftoversMu.Unlock()
-				pool.procCtxsMu.Unlock()
 			}
 			pool.all.Remove(hash)
 			pool.priced.Removed()
 		}
+
 		if !isQuorum {
 			// Drop all transactions that are too costly (low balance or out of gas)
 			drops, _ := list.Filter(pool.currentState.GetBalance(addr), pool.currentMaxGas)
@@ -1082,15 +1072,11 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 				hash := tx.Hash()
 				log.Trace("Removed unpayable queued transaction", "hash", hash)
 				if !scommit && ref {
-					pool.procCtxsMu.RLock()
-					pool.leftoversMu.Lock()
-					if _, hok := pool.procCtxs[hash]; !hok {
+					if pool.chain.IsProcessed(hash) {
 						pool.leftovers[hash] = tx
 					} else {
 						delete(pool.leftovers, hash)
 					}
-					pool.leftoversMu.Unlock()
-					pool.procCtxsMu.RUnlock()
 				}
 				pool.all.Remove(hash)
 				pool.priced.Removed()
@@ -1099,7 +1085,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 		}
 		if !scommit && ref {
 			for tHash, tx := range pool.leftovers {
-				if _, tok := pool.procCtxs[tHash]; !tok {
+				if pool.chain.IsProcessed(tHash) {
 					if pool.promoteTx(addr, tHash, tx) {
 						log.Trace("Promoting queued transaction", "hash", tHash)
 						promoted = append(promoted, tx)
@@ -1255,6 +1241,8 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 func (pool *TxPool) demoteUnexecutables() {
 	var ref = pool.myshard == uint64(0)
 	// Iterate over all accounts and demote any non-executable transactions
+	pool.leftoversMu.Lock()
+	defer pool.leftoversMu.Unlock()
 	for addr, list := range pool.pending {
 		nonce := pool.currentState.GetNonce(addr)
 		_, scommit := pool.addrShardMap[addr]
@@ -1264,15 +1252,11 @@ func (pool *TxPool) demoteUnexecutables() {
 			hash := tx.Hash()
 			log.Trace("Removed old pending transaction", "hash", hash)
 			if !scommit && ref {
-				pool.procCtxsMu.RLock()
-				pool.leftoversMu.Lock()
-				if _, hok := pool.procCtxs[hash]; !hok {
+				if pool.chain.IsProcessed(hash) {
 					pool.leftovers[hash] = tx
 				} else {
 					delete(pool.leftovers, hash)
 				}
-				pool.leftoversMu.Unlock()
-				pool.procCtxsMu.RUnlock()
 			}
 			pool.all.Remove(hash)
 			pool.priced.Removed()
@@ -1283,15 +1267,11 @@ func (pool *TxPool) demoteUnexecutables() {
 			hash := tx.Hash()
 			log.Trace("Removed unpayable pending transaction", "hash", hash)
 			if !scommit && ref {
-				pool.procCtxsMu.RLock()
-				pool.leftoversMu.Lock()
-				if _, hok := pool.procCtxs[hash]; !hok {
+				if pool.chain.IsProcessed(hash) {
 					pool.leftovers[hash] = tx
 				} else {
 					delete(pool.leftovers, hash)
 				}
-				pool.leftoversMu.Unlock()
-				pool.procCtxsMu.RUnlock()
 			}
 			pool.all.Remove(hash)
 			pool.priced.Removed()

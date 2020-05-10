@@ -90,13 +90,17 @@ func GetHashFn(ref *types.Header, chain ChainContext) func(n uint64) common.Hash
 func CanTransfer(dc *types.DataCache, bshard uint64, db vm.StateDB, addr common.Address, amount *big.Int) bool {
 	var balance *big.Int
 	if dc != nil {
-		shard := dc.AddrToShard[addr]
-		if shard != bshard {
-			balance = new(big.Int).SetUint64(dc.Values[addr].Balance)
-		} else {
-			balance = db.GetBalance(addr)
+		dc.DataCacheMu.RLock()
+		defer dc.DataCacheMu.RUnlock()
+		if shard, sok := dc.AddrToShard[addr]; sok {
+			if shard != bshard {
+				balance = new(big.Int).SetUint64(dc.Values[addr].Balance)
+			} else {
+				balance = db.GetBalance(addr)
+			}
+			return balance.Cmp(amount) >= 0
 		}
-		return balance.Cmp(amount) >= 0
+		return false
 	}
 	return db.GetBalance(addr).Cmp(amount) >= 0
 }
@@ -104,15 +108,26 @@ func CanTransfer(dc *types.DataCache, bshard uint64, db vm.StateDB, addr common.
 // Transfer subtracts amount from sender and adds amount to recipient using the given Db
 func Transfer(bshard uint64, dc *types.DataCache, dcChanges map[common.Address]*types.CData, db vm.StateDB, sender, recipient common.Address, amount *big.Int) {
 	if dc != nil {
+		dc.DataCacheMu.RLock()
+		defer dc.DataCacheMu.RUnlock()
 		sshard := dc.AddrToShard[sender]
 		if sshard != bshard {
 			if _, ok := dcChanges[sender]; !ok {
 				vals := dc.Values[sender]
-				dcChanges[sender] = &types.CData{
-					Addr:    sender,
-					Balance: vals.Balance,
-					Nonce:   vals.Nonce,
-					Data:    make(map[common.Hash]common.Hash),
+				if vals != nil {
+					dcChanges[sender] = &types.CData{
+						Addr:    sender,
+						Balance: vals.Balance,
+						Nonce:   vals.Nonce,
+						Data:    make(map[common.Hash]common.Hash),
+					}
+				} else {
+					dcChanges[recipient] = &types.CData{
+						Addr:    recipient,
+						Balance: db.GetBalance(recipient).Uint64(),
+						Nonce:   db.GetNonce(recipient),
+						Data:    make(map[common.Hash]common.Hash),
+					}
 				}
 			}
 			dcChanges[sender].Balance = dcChanges[sender].Balance - amount.Uint64()
@@ -124,11 +139,20 @@ func Transfer(bshard uint64, dc *types.DataCache, dcChanges map[common.Address]*
 		if rshard != bshard {
 			if _, ok := dcChanges[recipient]; !ok {
 				vals := dc.Values[recipient]
-				dcChanges[recipient] = &types.CData{
-					Addr:    recipient,
-					Balance: vals.Balance,
-					Nonce:   vals.Nonce,
-					Data:    make(map[common.Hash]common.Hash),
+				if vals != nil {
+					dcChanges[recipient] = &types.CData{
+						Addr:    recipient,
+						Balance: vals.Balance,
+						Nonce:   vals.Nonce,
+						Data:    make(map[common.Hash]common.Hash),
+					}
+				} else {
+					dcChanges[recipient] = &types.CData{
+						Addr:    recipient,
+						Balance: db.GetBalance(recipient).Uint64(),
+						Nonce:   db.GetNonce(recipient),
+						Data:    make(map[common.Hash]common.Hash),
+					}
 				}
 			}
 			dcChanges[recipient].Balance = dcChanges[recipient].Balance + amount.Uint64()

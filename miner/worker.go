@@ -18,6 +18,7 @@ package miner
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"math/big"
@@ -161,26 +162,18 @@ type worker struct {
 
 	addrShardMap map[common.Address]uint64 // Which commit address belong to which map!
 
-	lockedAddr   map[common.Address]*types.CLock // Currently locked keys, to be used by rs nodes
-	lockedAddrMu sync.RWMutex                    // Lock for lockedAddr
+	rwLocked   map[common.Address]*types.CLock // Currently locked keys, to be used by rs nodes
+	rwLockedMu sync.RWMutex                    // Lock for lockedAddr
 
-	lockedAddrMap   map[uint64][]common.Address // shard: address mapping for locked contracts
-	lockedAddrMapMu sync.RWMutex
+	lockedAddrMap map[uint64]map[common.Address]bool // shard: address mapping for locked contracts
 
-	cUnlockedAddr   map[common.Address]*types.CLock // locally Unlocked keys
-	cUnlockedAddrMu sync.RWMutex
+	cUnlocked map[common.Address]*types.CLock
+	cLocked   map[common.Address]*types.CLock
+	cLockedMu sync.RWMutex
 
-	cLockedAddr   map[common.Address]*types.CLock // locally locked keys
-	cLockedAddrMu sync.RWMutex
-
-	lastCommit   map[uint64]*types.Commitment // To store the last rs block that includes a commit
-	lastCommitMu sync.RWMutex                 // Lock for lastCommit
-
-	lastCtx   map[uint64]uint64 // to store whether a shard is touched by a ctx or not
-	lastCtxMu sync.RWMutex      // Lock for lastCtxMu
-
+	lastCommit map[uint64]*types.Commitment // To store the last rs block that includes a commit
+	lastCtx    map[uint64]uint64            // to store whether a shard is touched by a ctx or not
 	procCtxs   map[common.Hash]bool
-	procCtxsMu sync.RWMutex
 
 	foreignDataCh   chan core.ForeignDataEvent
 	foreignDataSub  event.Subscription
@@ -246,7 +239,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex, lockedAddr map[common.Address]*types.CLock, lockedAddrMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCommitMu sync.RWMutex, lastCtx map[uint64]uint64, lastCtxMu sync.RWMutex, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64][]common.Address, lockedAddrMapMu sync.RWMutex, procCtxs map[common.Hash]bool, procCtxsMu sync.RWMutex) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, procCtxs map[common.Hash]bool) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -284,20 +277,18 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		foreignDataCh:      make(chan core.ForeignDataEvent),
 		commitLock:         commitLock,
 		crossTxsLock:       crossTxsLock,
-		lockedAddr:         lockedAddr,
-		lockedAddrMu:       lockedAddrMu,
+		rwLocked:           rwLocked,
+		rwLockedMu:         rwLockedMu,
+		cLocked:            make(map[common.Address]*types.CLock),
+		cUnlocked:          make(map[common.Address]*types.CLock),
 		lastCommit:         lastCommit,
-		lastCommitMu:       lastCommitMu,
 		lastCtx:            lastCtx,
-		lastCtxMu:          lastCtxMu,
 		lockedAddrMap:      lockedAddrMap,
-		lockedAddrMapMu:    lockedAddrMapMu,
 		crossWorkCh:        make(chan struct{}),
 		pendingResultCh:    make(chan struct{}),
 		stopProcessCh:      make(chan struct{}),
 		addrShardMap:       make(map[common.Address]uint64),
 		procCtxs:           procCtxs,
-		procCtxsMu:         procCtxsMu,
 	}
 	if _, ok := engine.(consensus.Istanbul); ok || !config.IsQuorum || config.Clique != nil {
 		// Subscribe NewTxsEvent for tx pool
@@ -311,7 +302,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 
 		// Fixing the gas limit for the entire blockchain.
 		worker.gasLimit = core.CalcGasLimit(worker.chain.GetBlockByNumber(uint64(0)), worker.gasFloor, worker.gasCeil)
-
 		// Sanitize recommit interval if the user-specified one is too short.
 		if recommit < minRecommitInterval {
 			log.Warn("Sanitizing miner recommit interval", "provided", recommit, "updated", minRecommitInterval)
@@ -839,67 +829,10 @@ func (w *worker) resultLoop() {
 
 			// Update locked status
 			if w.eth.MyShard() == uint64(0) {
-				var (
-					txType      uint64
-					index       = 4
-					receipt     *types.Receipt
-					status      bool             // receipt status
-					lockedAddrs []common.Address // locked address of a shard
-					shards      []uint64         // shards involved in a cross shard tx
-					numShard    int
-					shard       uint64
-					sok         bool
-					elemSize    = 32
-				)
-				for i, tx := range block.Transactions() {
-					txType = tx.TxType()
-					receipt = task.receipts[i]
-					status = receipt.Status == uint64(1)
-					if status && txType == types.StateCommit {
-						shard, _, _ = types.DecodeStateCommit(tx)
-
-						w.lockedAddrMapMu.RLock()
-						lockedAddrs, sok = w.lockedAddrMap[shard]
-						w.lockedAddrMapMu.RUnlock()
-
-						// Continue if the shard do not exists in the lockedAddrMap
-						if !sok || len(lockedAddrs) == 0 {
-							continue
-						}
-
-						w.lockedAddrMu.Lock()
-						for _, addr := range lockedAddrs {
-							delete(w.lockedAddr, addr)
-						}
-						w.lockedAddrMu.Unlock()
-
-						// Unlock all keys of the shard
-						w.lockedAddrMapMu.Lock()
-						delete(w.lockedAddrMap, shard)
-						w.lockedAddrMapMu.Unlock()
-
-					} else if status && txType == types.CrossShard {
-						data := tx.Data()[4:]
-						shards, _ = types.DecodeCrossTx(uint64(0), data)
-						numShard = len(shards)
-						index = (2+1+numShard)*elemSize + elemSize + 2
-						// Fetch all read-write keys of a transaction
-						allKyes, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
-						// Update the global locked keys and lockedAddrMap
-						w.addNewLocks(allKyes)
-						// Independent of the execution status of a cross-shard transaction, mark it
-						// as processed!
-					} else {
-						log.Warn("Skipping transaction", "hash", tx.Hash(), "status", status, "type", txType)
-					}
-					if txType == types.CrossShard {
-						w.procCtxsMu.Lock()
-						w.procCtxs[tx.Hash()] = false
-						w.procCtxsMu.Unlock()
-					}
-				}
+				w.rwLockedMu.Lock()
+				w.updateRefStatus(block, task.receipts)
+				w.rwLockedMu.Unlock()
 			}
-
 			log.Info("Successfully sealed new block", "number", block.Number(), "sealhash", sealhash, "hash", hash, "root", block.Root(),
 				"elapsed", common.PrettyDuration(time.Since(task.createdAt)))
 
@@ -921,6 +854,100 @@ func (w *worker) resultLoop() {
 
 		case <-w.exitCh:
 			return
+		}
+	}
+}
+
+func (w *worker) updateRefStatus(block *types.Block, receipts types.Receipts) {
+	var (
+		elemSize  = 32
+		u64Offset = 24
+		bNum      = block.NumberU64()
+		receipt   *types.Receipt
+		rStatus   bool
+		tStatus   bool
+		txType    uint64
+		eventOut  uint64
+	)
+	for i, tx := range block.Transactions() {
+		receipt = receipts[i]
+		rStatus = receipt.Status == uint64(1)
+		txType = tx.TxType()
+
+		tStatus = false
+		if rStatus && receipt.Logs != nil {
+			if txType == types.CrossShard || txType == types.StateCommit {
+				eventOut = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
+				tStatus = eventOut == uint64(1)
+			} else {
+				log.Debug("Not a relavent transaction", "status", rStatus, "txType", txType)
+			}
+		} else {
+			log.Debug("Not parsing transaction", "rs", rStatus, "txType", txType, "logs", receipt.Logs)
+		}
+
+		if tStatus {
+			if txType == types.CrossShard {
+				// Marking the trasnaction as processed
+				w.procCtxs[tx.Hash()] = false
+				// Updating latest cross-shard transaction for a shard
+				data := tx.Data()[4:]
+				_, shards, _ := types.DecodeCrossTx(uint64(0), data)
+				for _, shard := range shards {
+					w.lastCtx[shard] = bNum
+				}
+				// Updating global locks based on the new cross-shard transaction
+				numShard := len(shards)
+				index := (2+1+numShard)*elemSize + elemSize + 2
+				allKeys, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
+				w.addNewLocks(allKeys)
+			} else if txType == types.StateCommit {
+				// Extracting data
+				shard, commit, report, root := types.DecodeStateCommit(tx)
+				// Unlocking keys due to state commit
+				lockedAddrs, sok := w.lockedAddrMap[shard]
+				log.Info("Unlocking locked keys!", "len", len(lockedAddrs))
+				if sok && len(lockedAddrs) > 0 {
+					for addr := range lockedAddrs {
+						delete(w.rwLocked, addr)
+					}
+					delete(w.lockedAddrMap, shard)
+				}
+				// Updating the latest commit of a shard
+				lcommit := w.lastCommit[shard]
+				if report >= lcommit.RefNum {
+					w.lastCommit[shard] = &types.Commitment{Shard: shard, BlockNum: commit, RefNum: report, StateRoot: root} // Update last commit of a shard!
+				}
+			}
+		}
+	}
+}
+
+func (w *worker) addNewLocks(allKeys map[uint64][]*types.CKeys) {
+	// This method assumes that the w.rwLockedMu lock is already held
+	var addr common.Address
+	for shard, sKeys := range allKeys {
+		if _, sok := w.lockedAddrMap[shard]; !sok {
+			w.lockedAddrMap[shard] = make(map[common.Address]bool)
+		}
+		// for every contract of a shard
+		for _, cKeys := range sKeys {
+			addr = cKeys.Addr
+			// Adding address to lockedAddrMap
+			if _, aok := w.rwLocked[addr]; !aok {
+				w.rwLocked[addr] = types.NewCLock(addr)
+			}
+			if _, aok := w.lockedAddrMap[shard][addr]; !aok {
+				w.lockedAddrMap[shard][addr] = false
+			}
+			// Add lock to all keys
+			for _, key := range cKeys.Keys {
+				w.rwLocked[addr].Keys[key] = false
+			}
+			// Mark write locks
+			for _, key := range cKeys.WKeys {
+				w.rwLocked[addr].Keys[key] = true
+			}
 		}
 	}
 }
@@ -954,9 +981,11 @@ func (w *worker) crossTaskLoop() {
 			w.processingMu.Lock()
 			if atomic.LoadInt32(&w.processing) == 0 {
 				atomic.StoreInt32(&w.processing, 1)
+				w.processingMu.Unlock()
 				go w.processCrossTxs()
+			} else {
+				w.processingMu.Unlock()
 			}
-			w.processingMu.Unlock()
 		case <-w.exitCh:
 			return
 		}
@@ -1100,7 +1129,7 @@ func (w *worker) commitPendingTransaction(tx *types.Transaction, header *types.H
 	if err != nil {
 		env.state.RevertToSnapshot(snap)
 		env.privateState.RevertToSnapshot(psnap)
-		log.Info("Skipping transaction", "thash", tx.Hash(), "error", err)
+		log.Info("Skipping pending transaction", "thash", tx.Hash(), "error", err)
 
 		// Create a dummy recipt if the transaction failed
 		root := env.state.IntermediateRoot(false)
@@ -1131,9 +1160,11 @@ func (w *worker) makeCurrent(reorg bool, parent *types.Block, header *types.Head
 			processedRef := w.refCache.RefNum
 			if processedRef == refNum {
 				header.GasUsed = w.refCache.GasUsed
+				w.refCacheMu.RUnlock()
 				break
+			} else {
+				w.refCacheMu.RUnlock()
 			}
-			w.refCacheMu.RUnlock()
 			select {
 			case <-w.pendingResultCh:
 				continue
@@ -1144,7 +1175,6 @@ func (w *worker) makeCurrent(reorg bool, parent *types.Block, header *types.Head
 		privateState, err := w.chain.PrivateStateAt(parent.Root())
 		if err != nil {
 			log.Error("Private state nil", "bn", parent.NumberU64(), "bh", parent.Root())
-			w.refCacheMu.RUnlock()
 			return err
 		}
 
@@ -1164,8 +1194,6 @@ func (w *worker) makeCurrent(reorg bool, parent *types.Block, header *types.Head
 			txs:          txCopy,
 			tcount:       w.refCache.Tcount,
 		}
-		w.refCacheMu.RUnlock()
-
 	} else {
 		publicState, privateState, err := w.chain.StateAt(parent.Root())
 		if err != nil {
@@ -1301,7 +1329,7 @@ func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32
 
 	gasPrice := big.NewInt(0)
 	blkGasLimit := w.current.header.GasLimit
-	gasLimit := blkGasLimit / 100
+	gasLimit := blkGasLimit / 2
 	// To check contract objects
 	for _, contract := range contracts.Contracts {
 
@@ -1611,13 +1639,9 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 
 	if w.eth.MyShard() == uint64(0) {
 		// Resetting cLockedAddr and cUnlockedAddr
-		w.cLockedAddrMu.Lock()
-		w.cLockedAddr = make(map[common.Address]*types.CLock)
-		w.cLockedAddrMu.Unlock()
-
-		w.cUnlockedAddrMu.Lock()
-		w.cUnlockedAddr = make(map[common.Address]*types.CLock)
-		w.cUnlockedAddrMu.Unlock()
+		w.rwLockedMu.Lock()
+		w.cLocked = make(map[common.Address]*types.CLock)
+		w.cUnlocked = make(map[common.Address]*types.CLock)
 
 		// Split the pending transactions into state commitment and cross-shard txs
 		stateTxs, crossTxs := make(map[common.Address]types.Transactions), pending
@@ -1632,6 +1656,7 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 			commits := w.NewValidStateCommitments(stateTxs)
 			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, commits)
 			if w.commitTransactions(txs, w.coinbase, interrupt) {
+				w.rwLockedMu.Unlock()
 				return
 			}
 		}
@@ -1640,9 +1665,11 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 			ctxs := w.NewValidCrossTransactions(crossTxs)
 			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, ctxs)
 			if w.commitTransactions(txs, w.coinbase, interrupt) {
+				w.rwLockedMu.Unlock()
 				return
 			}
 		}
+		w.rwLockedMu.Unlock()
 	} else {
 		// Split the pending transactions into locals and remotes
 		localTxs, remoteTxs := make(map[common.Address]types.Transactions), pending
@@ -1680,19 +1707,15 @@ func (w *worker) NewValidStateCommitments(stateTxs map[common.Address]types.Tran
 		var maxTx *types.Transaction
 		shard = w.addrShardMap[addr]
 
-		w.lastCommitMu.RLock()
-		w.lastCtxMu.RLock()
 		lastCommit := w.lastCommit[shard] // latest commit of a shard
 		lastCtx := w.lastCtx[shard]       // height of latest cross-shard tx for a shard
-		w.lastCommitMu.RUnlock()
-		w.lastCtxMu.RUnlock()
 
 		maxRef = lastCommit.RefNum   // latest reported reference num
 		maxCom = lastCommit.BlockNum // latest commited block
 
 		// Itereate through all state commits
 		for _, tx := range txs {
-			_, commit, report := types.DecodeStateCommit(tx)
+			_, commit, report, _ := types.DecodeStateCommit(tx)
 			// Only accept if no new cross-shard transactions are added after reproted block!
 			if report >= lastCtx {
 				if report > maxRef {
@@ -1711,39 +1734,25 @@ func (w *worker) NewValidStateCommitments(stateTxs map[common.Address]types.Tran
 		}
 		if maxTx != nil { // Add to new commits
 			newCommits[addr] = types.Transactions{maxTx}
-			w.UnlockKeys(shard)
+			w.unlockKeys(shard)
 		}
 		delete(stateTxs, addr) // Remove all old commits
 	}
 	return newCommits
 }
-func (w *worker) UnlockKeys(shard uint64) {
-	var (
-		lockedAddrs []common.Address
-		keys        map[common.Hash]bool
-	)
-	w.lockedAddrMapMu.Lock()
-	lockedAddrs = w.lockedAddrMap[shard] // list of currently locked address of a shard
-	w.lockedAddrMapMu.Unlock()
+
+// unlockKeys ulocks currently locked key
+func (w *worker) unlockKeys(shard uint64) {
+	lockedAddrs := w.lockedAddrMap[shard] // list of currently locked address of a shard
 	// If no locked address for a particular shard, then return
-	if len(lockedAddrs) == 0 {
-		return
-	}
-	// For every locked contract of a shard
-	for _, addr := range lockedAddrs {
-		// Iniitlialize unlocked address if not already initialized
-		w.cUnlockedAddrMu.Lock()
-		if _, uaok := w.cUnlockedAddr[addr]; !uaok {
-			w.cUnlockedAddr[addr] = types.NewCLock(addr)
+	if len(lockedAddrs) > 0 {
+		// For every locked contract of a shard
+		for addr := range lockedAddrs {
+			// Iniitlialize unlocked address if not already initialized
+			if _, uaok := w.cUnlocked[addr]; !uaok {
+				w.cUnlocked[addr] = types.NewCLock(addr)
+			}
 		}
-		// Extract the keys and unlock them
-		w.lockedAddrMu.RLock()
-		keys = w.lockedAddr[addr].Keys
-		for key := range keys {
-			w.cUnlockedAddr[addr].Keys[key] = false
-		}
-		w.lockedAddrMu.RUnlock()
-		w.cUnlockedAddrMu.Unlock()
 	}
 }
 
@@ -1752,10 +1761,11 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 	var (
 		newCtxs  = make(map[common.Address]types.Transactions)
 		numShard int
-		index    int
-		start    int
-		end      int
-		elemSize = 32
+		index    uint64
+		start    = 0
+		others   = 0
+		end      = 0
+		u32      = uint64(32)
 		data     []byte
 		shards   []uint64
 	)
@@ -1764,19 +1774,18 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 		for _, tx := range txs {
 			// If the transaction is not cross-shard
 			if tx.TxType() != types.CrossShard {
+				others = others + 1
 				continue
 			}
-			w.procCtxsMu.RLock()
 			if _, tok := w.procCtxs[tx.Hash()]; tok {
-				w.procCtxsMu.RUnlock()
+				others = others + 1
 				continue
 			}
-			w.procCtxsMu.RUnlock()
 
 			data = tx.Data()[4:]
-			shards, _ = types.DecodeCrossTx(uint64(0), data) // To remove shard information
+			index, shards, _ = types.DecodeCrossTx(uint64(0), data) // To remove shard information
 			numShard = len(shards)
-			index = (2+1+numShard)*elemSize + elemSize + 2
+			index = index + u32 + uint64(2) // (index + size of data + numshard)
 			// Fetch all read-write keys of a transaction
 			allKyes, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
 			// If can inlucde the latest transaction
@@ -1790,93 +1799,44 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 			}
 		}
 	}
-	log.Info("@ctx, Returning NewValidCrossTransactions", "start", start, "end", end)
+	log.Info("@ctx, Returning NewValidCrossTransactions", "start", start, "end", end, "others", others)
 	return newCtxs
 }
 
-func (w *worker) addNewLocks(allKeys map[uint64][]*types.CKeys) {
-	var addr common.Address
-	// all contracts of a shard
-	for shard, sKeys := range allKeys {
-		w.lockedAddrMapMu.Lock()
-		if _, sok := w.lockedAddrMap[shard]; !sok {
-			w.lockedAddrMap[shard] = []common.Address{}
-		}
-		w.lockedAddrMapMu.Unlock()
-		// for every contract of a shard
-		for _, cKeys := range sKeys {
-			addr = cKeys.Addr
-			w.lockedAddrMu.Lock()
-			if _, aok := w.lockedAddr[addr]; !aok {
-				w.lockedAddr[addr] = types.NewCLock(addr)
-				// Adding address to lockedAddrMap
-				w.lockedAddrMapMu.Lock()
-				w.lockedAddrMap[shard] = append(w.lockedAddrMap[shard], addr)
-				w.lockedAddrMapMu.Unlock()
+// updateLockStatus temporarily locks additional keys
+func (w *worker) updateLockStatus(allKeys map[uint64][]*types.CKeys) {
+	// This method assumes that the w.rwLockedMu method is already held
+	for _, shardKeys := range allKeys {
+		for _, cKeys := range shardKeys {
+			addr := cKeys.Addr
+			if _, caok := w.cLocked[addr]; !caok {
+				w.cLocked[addr] = types.NewCLock(addr)
 			}
 			for _, key := range cKeys.Keys {
-				w.lockedAddr[addr].Keys[key] = false
+				w.cLocked[addr].Keys[key] = false
 			}
-			w.lockedAddrMu.Unlock()
-		}
-	}
-}
-
-// updateLockStatus temporarily update local locks based on transactions
-// included so far!
-func (w *worker) updateLockStatus(allKeys map[uint64][]*types.CKeys) {
-	// all contracts of a shard
-	for _, sKeys := range allKeys {
-		// for every contract of a shard
-		for _, cKeys := range sKeys {
-			w.updateLock(cKeys.Addr, cKeys.Keys)
-		}
-	}
-}
-
-// updateLock for every contract!
-func (w *worker) updateLock(addr common.Address, addrKeys []common.Hash) {
-	w.cLockedAddrMu.Lock()
-	w.cUnlockedAddrMu.Lock()
-
-	// Create a new entry in locally locked if it is not already there
-	if _, caok := w.cLockedAddr[addr]; !caok {
-		w.cLockedAddr[addr] = types.NewCLock(addr)
-	}
-
-	if _, uaok := w.cUnlockedAddr[addr]; uaok {
-		// Remove the unlocked keys if exists and add new locally locked keys
-		unlockedKeys := w.cUnlockedAddr[addr].Keys
-		for _, key := range addrKeys {
-			if _, kok := unlockedKeys[key]; kok {
-				delete(unlockedKeys, key) // If already in unlocked; then delete
-			} else {
-				w.cLockedAddr[addr].Keys[key] = false
+			for _, key := range cKeys.WKeys {
+				w.cLocked[addr].Keys[key] = true
 			}
 		}
-		// If all keys in unlocked keys are removed, delete the entry
-		if len(unlockedKeys) == 0 {
-			delete(w.cUnlockedAddr, addr)
-		}
-	} else {
-		// If no unlocked keys, locked all the new keys!
-		for _, key := range addrKeys {
-			w.cLockedAddr[addr].Keys[key] = false
-		}
 	}
-	w.cUnlockedAddrMu.Unlock()
-	w.cLockedAddrMu.Unlock()
-	return
 }
 
 // checkTxStatus returns true if the transaction is eligible, otherwise return false
 func (w *worker) checkTxStatus(allKeys map[uint64][]*types.CKeys) bool {
-	// All contracts of a shard
-	for _, sKeys := range allKeys {
-		// for every contract
-		for _, cKeys := range sKeys {
-			if w.checkLockStatus(cKeys.Addr, cKeys.Keys) {
-				log.Debug("@ctx, already locked", "addr", cKeys.Addr)
+	// This method assumes that the w.rwLockedMu method is already held
+	for _, shardKeys := range allKeys {
+		for _, cKeys := range shardKeys {
+			addr := cKeys.Addr
+			lockMap := make(map[common.Hash]bool)
+			// Initialize lockMap base on read and write lock
+			for _, key := range cKeys.Keys {
+				lockMap[key] = false
+			}
+			for _, key := range cKeys.WKeys {
+				lockMap[key] = true
+			}
+			if w.checkLockStatus(addr, lockMap) {
 				return false
 			}
 		}
@@ -1886,63 +1846,37 @@ func (w *worker) checkTxStatus(allKeys map[uint64][]*types.CKeys) bool {
 
 // To check whether any key of a particular contract is locked; return true if locked
 // otherwise return false
-func (w *worker) checkLockStatus(addr common.Address, addrKeys []common.Hash) bool {
-	w.lockedAddrMu.RLock()
-	_, galok := w.lockedAddr[addr] // globally locked
-	w.lockedAddrMu.RUnlock()
-	_, calok := w.cLockedAddr[addr] // locally locked
+func (w *worker) checkLockStatus(addr common.Address, addrKeys map[common.Hash]bool) bool {
+	// This method assumes that w.rwLockedMu is held
+	_, galok := w.rwLocked[addr] // globally locked
+	_, calok := w.cLocked[addr]  // locally locked
 
 	// Contract not locked
 	if !galok && !calok {
-		log.Debug("@ctx, returning false !galok && !calok")
 		return false
 	}
 
-	// If currently locked on key, return true
+	// If currently locked on key
 	if calok {
-		cLockedKeys := w.cLockedAddr[addr].Keys
-		for _, key := range addrKeys {
-			if _, cok := cLockedKeys[key]; cok {
-				log.Debug("@ctx, already locked calock", "addr", addr, "key", key)
+		cLockedKeys := w.cLocked[addr].Keys
+		for key := range addrKeys {
+			// If already a write lock is acquired on any specific key
+			if cval, cok := cLockedKeys[key]; cok && cval {
 				return true
 			}
 		}
 	}
 
-	// If currently not locked on any relavent key, check global lock
-	if galok {
-		// Fetch locked keys of the given contract
-		w.lockedAddrMu.RLock()
-		gLockedCLock := w.lockedAddr[addr]
-		w.lockedAddrMu.RUnlock()
-		gLockedCLock.ClockMu.RLock()
-		defer gLockedCLock.ClockMu.RUnlock()
-		gLockedKeys := gLockedCLock.Keys
-
-		// keys unlocked due to latest state commitment!
-		if _, auok := w.cUnlockedAddr[addr]; auok {
-			unlockedKeys := w.cUnlockedAddr[addr].Keys
-			// For every used key of given contract
-			for _, key := range addrKeys {
-				_, gok := gLockedKeys[key]
-				_, uok := unlockedKeys[key]
-				if gok && !uok {
-					log.Debug("@ctx, already locked galok", "addr", addr, "key", key)
-					return true
-				}
-			}
-			return false
-		}
-
-		// keys not unlocked locally
-		for _, key := range addrKeys {
-			if _, gok := gLockedKeys[key]; gok {
-				log.Debug("@ctx, already locked no auok", "addr", addr, "key", key)
+	// Not unlocked and present in global lock
+	if _, ualok := w.cUnlocked[addr]; !ualok && galok {
+		gLockedKeys := w.rwLocked[addr].Keys
+		for key := range addrKeys {
+			if gval, gok := gLockedKeys[key]; gok && gval {
 				return true
 			}
 		}
-		return false
 	}
+	// Either unlocked or not present in global lock
 	return false
 }
 
