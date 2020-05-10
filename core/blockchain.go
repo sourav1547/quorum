@@ -181,16 +181,13 @@ type BlockChain struct {
 	badBlocks      *lru.Cache              // Bad block cache
 	shouldPreserve func(*types.Block) bool // Function used to determine whether should preserve the given block.
 
-	refCacheMu sync.RWMutex
-	refCache   *ExecResult
-
 	privateStateCache state.Database // Private state database to reuse between imports (contains state cache)
 }
 
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *ExecResult, refCacheMu, commitLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, lockedAddrMap map[uint64]map[common.Address]bool, procCtxs map[common.Hash]bool) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, lockedAddrMap map[uint64]map[common.Address]bool, procCtxs map[common.Hash]bool) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -231,8 +228,6 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		foreignDataCh:     make(chan struct{}),
 		myLatestCommit:    myLatestCommit,
 		commitLock:        commitLock,
-		refCache:          refCache,
-		refCacheMu:        refCacheMu,
 		rwLocked:          rwLocked,
 		rwLockedMu:        rwLockedMu,
 		lastCommit:        lastCommit,
@@ -256,11 +251,9 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	if bc.ref {
 		refNum := uint64(0)
 		genRoot := bc.genesisBlock.Root()
-		genesisState, err := state.New(genRoot, bc.stateCache)
 		if err != nil {
 			return nil, err
 		}
-		bc.refCache.State = genesisState.Copy()
 		bc.foreignData[refNum] = types.NewDataCache(refNum, true)
 
 		bc.commitments[refNum] = types.NewCommitments()
@@ -1695,7 +1688,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 					startIndex := (2+1+numShards)*elemSize + elemSize // Last 32 bytes to avoid string length
 					crossTx := types.ParseCrossTxData(uint16(numShards), data[2+startIndex:])
 					crossTx.BlockNum = block.Number()
-					log.Info("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved)
+					log.Debug("New cross shard transaction added!", "bn", refNum, "shards", shardsInvolved)
 
 					if _, ok := bc.pendingCrossTxs[refNum]; !ok {
 						bc.pendingCrossTxs[refNum] = types.NewCrossShardTxs()

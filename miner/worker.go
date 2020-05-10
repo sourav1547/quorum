@@ -239,7 +239,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, refCache *core.ExecResult, refCacheMu, commitLock, crossTxsLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, procCtxs map[common.Hash]bool) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock, crossTxsLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, procCtxs map[common.Hash]bool) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -270,8 +270,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		commitments:        commitments,
 		pendingCrossTxs:    pendingCrossTxs,
 		myLatestCommit:     myLatestCommit,
-		refCache:           refCache,
-		refCacheMu:         refCacheMu,
 		foreignData:        foreignData,
 		foreignDataMu:      foreignDataMu,
 		foreignDataCh:      make(chan core.ForeignDataEvent),
@@ -290,6 +288,17 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		addrShardMap:       make(map[common.Address]uint64),
 		procCtxs:           procCtxs,
 	}
+
+	worker.refCache = &core.ExecResult{
+		RefNum:    uint64(0),
+		GasUsed:   uint64(0),
+		Txs:       []*types.Transaction{},
+		Receipts:  []*types.Receipt{},
+		State:     nil,
+		CreatedAt: time.Now(),
+		Tcount:    0,
+	}
+
 	if _, ok := engine.(consensus.Istanbul); ok || !config.IsQuorum || config.Clique != nil {
 		// Subscribe NewTxsEvent for tx pool
 		worker.txsSub = eth.TxPool().SubscribeNewTxsEvent(worker.txsCh)
