@@ -18,7 +18,6 @@ package miner
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"math/big"
@@ -169,11 +168,9 @@ type worker struct {
 
 	cUnlocked map[common.Address]*types.CLock
 	cLocked   map[common.Address]*types.CLock
-	cLockedMu sync.RWMutex
 
 	lastCommit map[uint64]*types.Commitment // To store the last rs block that includes a commit
 	lastCtx    map[uint64]uint64            // to store whether a shard is touched by a ctx or not
-	procCtxs   map[common.Hash]bool
 
 	foreignDataCh   chan core.ForeignDataEvent
 	foreignDataSub  event.Subscription
@@ -239,7 +236,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock, crossTxsLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, procCtxs map[common.Hash]bool) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock, crossTxsLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -286,7 +283,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		pendingResultCh:    make(chan struct{}),
 		stopProcessCh:      make(chan struct{}),
 		addrShardMap:       make(map[common.Address]uint64),
-		procCtxs:           procCtxs,
 	}
 
 	worker.refCache = &core.ExecResult{
@@ -838,9 +834,7 @@ func (w *worker) resultLoop() {
 
 			// Update locked status
 			if w.eth.MyShard() == uint64(0) {
-				w.rwLockedMu.Lock()
-				w.updateRefStatus(block, task.receipts)
-				w.rwLockedMu.Unlock()
+				w.chain.UpdateRefStatus(block, task.receipts)
 			}
 			log.Info("Successfully sealed new block", "number", block.Number(), "sealhash", sealhash, "hash", hash, "root", block.Root(),
 				"elapsed", common.PrettyDuration(time.Since(task.createdAt)))
@@ -863,71 +857,6 @@ func (w *worker) resultLoop() {
 
 		case <-w.exitCh:
 			return
-		}
-	}
-}
-
-func (w *worker) updateRefStatus(block *types.Block, receipts types.Receipts) {
-	var (
-		elemSize  = 32
-		u64Offset = 24
-		bNum      = block.NumberU64()
-		receipt   *types.Receipt
-		rStatus   bool
-		tStatus   bool
-		txType    uint64
-		eventOut  uint64
-	)
-	for i, tx := range block.Transactions() {
-		receipt = receipts[i]
-		rStatus = receipt.Status == uint64(1)
-		txType = tx.TxType()
-
-		tStatus = false
-		if rStatus && receipt.Logs != nil {
-			if txType == types.CrossShard || txType == types.StateCommit {
-				eventOut = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
-				tStatus = eventOut == uint64(1)
-			} else {
-				log.Debug("Not a relavent transaction", "status", rStatus, "txType", txType)
-			}
-		} else {
-			log.Debug("Not parsing transaction", "rs", rStatus, "txType", txType, "logs", receipt.Logs)
-		}
-
-		if tStatus {
-			if txType == types.CrossShard {
-				// Marking the trasnaction as processed
-				w.procCtxs[tx.Hash()] = false
-				// Updating latest cross-shard transaction for a shard
-				data := tx.Data()[4:]
-				_, shards, _ := types.DecodeCrossTx(uint64(0), data)
-				for _, shard := range shards {
-					w.lastCtx[shard] = bNum
-				}
-				// Updating global locks based on the new cross-shard transaction
-				numShard := len(shards)
-				index := (2+1+numShard)*elemSize + elemSize + 2
-				allKeys, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
-				w.addNewLocks(allKeys)
-			} else if txType == types.StateCommit {
-				// Extracting data
-				shard, commit, report, root := types.DecodeStateCommit(tx)
-				// Unlocking keys due to state commit
-				lockedAddrs, sok := w.lockedAddrMap[shard]
-				log.Info("Unlocking locked keys!", "len", len(lockedAddrs))
-				if sok && len(lockedAddrs) > 0 {
-					for addr := range lockedAddrs {
-						delete(w.rwLocked, addr)
-					}
-					delete(w.lockedAddrMap, shard)
-				}
-				// Updating the latest commit of a shard
-				lcommit := w.lastCommit[shard]
-				if report >= lcommit.RefNum {
-					w.lastCommit[shard] = &types.Commitment{Shard: shard, BlockNum: commit, RefNum: report, StateRoot: root} // Update last commit of a shard!
-				}
-			}
 		}
 	}
 }
@@ -1786,7 +1715,7 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 				others = others + 1
 				continue
 			}
-			if _, tok := w.procCtxs[tx.Hash()]; tok {
+			if w.chain.IsProcessedLocked(tx.Hash()) {
 				others = others + 1
 				continue
 			}

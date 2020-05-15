@@ -187,7 +187,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, lockedAddrMap map[uint64]map[common.Address]bool, procCtxs map[common.Hash]bool) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, lockedAddrMap map[uint64]map[common.Address]bool) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -232,7 +232,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		rwLockedMu:        rwLockedMu,
 		lastCommit:        lastCommit,
 		lastCtx:           lastCtx,
-		procCtxs:          procCtxs,
+		procCtxs:          make(map[common.Hash]bool),
 		lockedAddrMap:     lockedAddrMap,
 	}
 	bc.SetValidator(NewBlockValidator(chainConfig, bc, engine))
@@ -340,6 +340,19 @@ func (bc *BlockChain) IsProcessed(hash common.Hash) bool {
 	defer bc.rwLockedMu.RUnlock()
 	_, tok := bc.procCtxs[hash]
 	return tok
+}
+
+// IsProcessedLocked returns whether a trasnaction is already processed or not!
+func (bc *BlockChain) IsProcessedLocked(thash common.Hash) bool {
+	// This function assumes the rwLockedMu is alread held
+	_, tok := bc.procCtxs[thash]
+	return tok
+}
+
+// AddProcessed a new trasnaction to the processed
+func (bc *BlockChain) AddProcessed(thash common.Hash) {
+	// This method assumes that rwLockedMu is already held
+	bc.procCtxs[thash] = false
 }
 
 // loadLastState loads the last known chain state from the database. This method
@@ -1521,9 +1534,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			// Update the reference status of shards i.e., update which shards committed
 			// new block and for which shard new cross-shard transactions were added!
 			if bc.myshard == uint64(0) {
-				bc.rwLockedMu.Lock()
 				bc.UpdateRefStatus(block, receipts)
-				bc.rwLockedMu.Unlock()
 			}
 
 		case SideStatTy:
@@ -1582,6 +1593,8 @@ func (bc *BlockChain) addNewLocks(allKeys map[uint64][]*types.CKeys) {
 
 // UpdateRefStatus updates current reference statsus
 func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipts) {
+	bc.rwLockedMu.Lock()
+	defer bc.rwLockedMu.Unlock()
 	var (
 		elemSize  = 32
 		u64Offset = 24
@@ -1612,7 +1625,7 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 		if tStatus {
 			if txType == types.CrossShard {
 				// Marking the trasnaction as processed
-				bc.procCtxs[tx.Hash()] = false
+				bc.AddProcessed(tx.Hash())
 				// Updating latest cross-shard transaction for a shard
 				data := tx.Data()[4:]
 				_, shards, _ := types.DecodeCrossTx(uint64(0), data)
