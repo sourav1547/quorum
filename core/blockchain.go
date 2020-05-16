@@ -24,6 +24,7 @@ import (
 	"io"
 	"math/big"
 	mrand "math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -128,9 +129,9 @@ type BlockChain struct {
 	foreignDataMu   sync.RWMutex                   // Lock for foreign data
 	foreignDataCh   chan struct{}
 
-	rwLocked   map[common.Address]*types.CLock // Currently readLocked
-	rwLockedMu sync.RWMutex                    // Lock for rwLocked
-
+	logdir        string
+	rwLocked      map[common.Address]*types.CLock    // Currently readLocked
+	rwLockedMu    sync.RWMutex                       // Lock for rwLocked
 	lockedAddrMap map[uint64]map[common.Address]bool // shard to addr map
 
 	lastCommit map[uint64]*types.Commitment // To store the last rs block that includes a commit
@@ -187,7 +188,7 @@ type BlockChain struct {
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialises the default Ethereum Validator and
 // Processor.
-func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, lockedAddrMap map[uint64]map[common.Address]bool) (*BlockChain, error) {
+func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *params.ChainConfig, engine consensus.Engine, vmConfig vm.Config, shouldPreserve func(block *types.Block) bool, ref bool, shard, numShard uint64, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, lockedAddrMap map[uint64]map[common.Address]bool, logdir string) (*BlockChain, error) {
 	if cacheConfig == nil {
 		cacheConfig = &CacheConfig{
 			TrieNodeLimit: 256,
@@ -234,6 +235,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 		lastCtx:           lastCtx,
 		procCtxs:          make(map[common.Hash]bool),
 		lockedAddrMap:     lockedAddrMap,
+		logdir:            logdir,
 	}
 	bc.SetValidator(NewBlockValidator(chainConfig, bc, engine))
 	bc.SetProcessor(NewStateProcessor(chainConfig, bc, engine))
@@ -1524,10 +1526,14 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			}
 
 			// Parse transactions in reference chain to check for new state commitments
-			if bc.ref {
-				curReport := bc.ParseBlock(block, receipts)
-				if curReport > report {
-					report = curReport
+			if bc.myshard > 0 {
+				if bc.ref {
+					curReport := bc.ParseBlock(block, receipts)
+					if curReport > report {
+						report = curReport
+					}
+				} else {
+					bc.LogData(false, block, receipts)
 				}
 			}
 
@@ -1594,6 +1600,37 @@ func (bc *BlockChain) addNewLocks(allKeys map[uint64][]*types.CKeys) {
 	}
 }
 
+// LogData logs data of local blocks!
+func (bc *BlockChain) LogData(self bool, block *types.Block, receipts types.Receipts) {
+	bc.rwLockedMu.Lock()
+	defer bc.rwLockedMu.Unlock()
+	// Logging local transaction!
+	ltdata := bc.logdir + "ltdata"
+	ltdataf, err := os.OpenFile(ltdata, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open ltdata file", "error", err)
+	}
+	defer ltdataf.Close()
+	// Parsing transactions!
+	bNum := block.NumberU64()
+	rNum := block.RefNumberU64()
+	txs := block.Transactions()
+	var txLen = 0
+	for i, tx := range txs {
+		receipt := receipts[i]
+		txLen++
+		fmt.Fprintln(ltdataf, bNum, rNum, tx.Hash().Hex(), tx.TxType(), receipt.Status, receipt.GasUsed, time.Now().Unix())
+	}
+	// Logging information about the block!
+	lbtime := bc.logdir + "lbtime"
+	lbtimef, err := os.OpenFile(lbtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open lbitme file!", "error", err)
+	}
+	fmt.Fprintln(lbtimef, bNum, rNum, block.Hash().Hex(), block.Root().Hex(), block.GasUsed(), txLen, self, time.Now().Unix())
+	lbtimef.Close()
+}
+
 // UpdateRefStatus updates current reference statsus
 func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipts) {
 	bc.rwLockedMu.Lock()
@@ -1608,10 +1645,33 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 		txType    uint64
 		eventOut  uint64
 	)
-	for i, tx := range block.Transactions() {
+	tdata := bc.logdir + "tdata"
+	tdataf, err := os.OpenFile(tdata, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer tdataf.Close()
+	ctxtime := bc.logdir + "ctxtime"
+	ctxtimef, err := os.OpenFile(ctxtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer ctxtimef.Close()
+	// state commitment time!
+	sctime := bc.logdir + "sctime"
+	sctimef, err := os.OpenFile(sctime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer sctimef.Close()
+	// Parsing trasnaction
+	txs := block.Transactions()
+	for i, tx := range txs {
 		receipt = receipts[i]
 		rStatus = receipt.Status == uint64(1)
 		txType = tx.TxType()
+		// Tranaction data file
+		fmt.Fprintln(tdataf, bNum, tx.Hash().Hex(), txType, rStatus, receipt.GasUsed, time.Now().Unix())
 
 		tStatus = false
 		if rStatus && receipt.Logs != nil {
@@ -1640,6 +1700,9 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 				index := (2+1+numShard)*elemSize + elemSize + 2
 				allKeys, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
 				bc.addNewLocks(allKeys)
+				// Logging data!
+				// Cross-shard transaction file
+				fmt.Fprintln(ctxtimef, bNum, tx.Hash().Hex(), numShard, time.Now().Unix())
 			} else if txType == types.StateCommit {
 				// Extracting data
 				shard, commit, report, root := types.DecodeStateCommit(tx)
@@ -1656,10 +1719,20 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 				lcommit := bc.lastCommit[shard]
 				if report >= lcommit.RefNum {
 					bc.lastCommit[shard] = &types.Commitment{Shard: shard, BlockNum: commit, RefNum: report, StateRoot: root} // Update last commit of a shard!
+					fmt.Fprintln(sctimef, shard, commit, report, root.Hex(), tx.Hash().Hex(), time.Now().Unix())
 				}
 			}
 		}
 	}
+	// Logging summary of the block
+	txLen := len(txs)
+	rtime := bc.logdir + "rtime"
+	rtimef, err := os.OpenFile(rtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open rtime file", "error", err)
+	}
+	fmt.Fprintln(rtimef, bNum, txLen, block.Hash().Hex(), block.Root().Hex(), block.GasLimit(), block.GasUsed(), time.Now().Unix())
+	rtimef.Close()
 }
 
 // ParseBlock function extracts necessary information from a reference block
@@ -1668,30 +1741,56 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 	u64Offset := 24
 	myshard := bc.MyShard()
 	refNum := block.NumberU64()
-	report := -1
+	ireport := -1
 	status := true
 
 	if _, ok := bc.commitments[refNum]; !ok && refNum > uint64(0) {
 		bc.commitments[refNum] = types.NewCommitments()
 		bc.commitments[refNum].CopyCommits(bc.numShard, bc.commitments[refNum-1])
 	}
-
-	for i, tx := range block.Transactions() {
+	// Transactional information!
+	tdata := bc.logdir + "tdata"
+	tdataf, err := os.OpenFile(tdata, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer tdataf.Close()
+	// Cross-shard transaction file
+	ctxtime := bc.logdir + "ctxtime"
+	ctxtimef, err := os.OpenFile(ctxtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer ctxtimef.Close()
+	// state commitment time!
+	sctime := bc.logdir + "sctime"
+	sctimef, err := os.OpenFile(sctime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open tdata file", "error", err)
+	}
+	defer sctimef.Close()
+	// Parsing transaction!
+	txs := block.Transactions()
+	for i, tx := range txs {
 		// Checking execution status of the transaction
 		receipt := receipts[i]
 		rStatus := receipt.Status == uint64(1)
+		txType := tx.TxType()
+		// Tranaction data file
+		fmt.Fprintln(tdataf, refNum, tx.Hash().Hex(), txType, rStatus, receipt.GasUsed, time.Now().Unix())
+
 		txStatus := false
 		var eventOutput uint64
 		if rStatus && receipt.Logs != nil {
-			if tx.TxType() == types.CrossShard || tx.TxType() == types.StateCommit {
+			if txType == types.CrossShard || txType == types.StateCommit {
 				eventOutput = binary.BigEndian.Uint64(receipt.Logs[0].Data[u64Offset:])
 				txStatus = eventOutput == uint64(1)
 			} else {
-				log.Debug("rStatus passed", "txType", tx.TxType())
+				log.Debug("rStatus passed", "txType", txType)
 				continue
 			}
 		} else {
-			log.Info("Not parsing transaction", "rs", rStatus, "txType", tx.TxType(), "logs", receipt.Logs)
+			log.Info("Not parsing transaction", "rs", rStatus, "txType", txType, "logs", receipt.Logs)
 		}
 
 		if txStatus {
@@ -1710,40 +1809,29 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 						bc.pendingCrossTxs[refNum] = types.NewCrossShardTxs()
 					}
 					bc.pendingCrossTxs[refNum].AddTransaction(uint64(i), crossTx)
+					// Logging data!
+					fmt.Fprintln(ctxtimef, refNum, tx.Hash().Hex(), crossTx.Tx.Hash(), numShards, time.Now().Unix())
 				}
 			} else if tx.TxType() == types.StateCommit {
-				data := tx.Data()[4:]
-				var (
-					index     = 0
-					shard     uint64
-					committed uint64
-					refReport uint64
-				)
-				shard = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-				index += elemSize
-				committed = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-				index += elemSize
-				refReport = binary.BigEndian.Uint64(data[index+u64Offset : index+elemSize])
-				index += elemSize
-				stateRoot := common.BytesToHash(data[index:])
+				shard, commit, report, root := types.DecodeStateCommit(tx)
 				if shard == bc.myshard {
 					bc.commitLock.Lock()
-					bc.myLatestCommit.Update(committed, refReport, stateRoot)
+					bc.myLatestCommit.Update(commit, report, root)
 					bc.commitLock.Unlock()
-					report = int(refReport)
-					log.Info("Updated Latest commit", "commited", committed, "reported", refReport, "reporting", refNum, "root", stateRoot)
-					bc.CleanPendingTx(refReport)
+					ireport = int(report)
+					log.Info("Updated Latest commit", "commit", commit, "report", report, "reporting", refNum, "root", root)
+					bc.CleanPendingTx(report)
 				} else {
-					commit := &types.Commitment{Shard: shard, BlockNum: committed, RefNum: refReport, StateRoot: stateRoot}
-					bc.commitments[refNum].AddCommit(shard, commit)
-					log.Debug("New commit added for ", "shard", shard, "committed", committed, "reporting", refNum, "root", stateRoot)
+					tcommit := &types.Commitment{Shard: shard, BlockNum: commit, RefNum: report, StateRoot: root}
+					bc.commitments[refNum].AddCommit(shard, tcommit)
+					log.Debug("New commit added for ", "shard", shard, "committed", commit, "reporting", refNum, "root", root)
 				}
+				fmt.Fprintln(sctimef, shard, commit, report, root.Hex(), tx.Hash().Hex(), time.Now().Unix())
 			}
 		} else {
 			log.Info("Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())
 		}
 	}
-
 	bc.foreignDataMu.Lock()
 	if _, ok := bc.foreignData[refNum]; !ok {
 		bc.foreignData[refNum] = types.NewDataCache(refNum, status)
@@ -1755,7 +1843,15 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 			go bc.PostForeignDataEvent(refNum)
 		}
 	}
-	return report
+	rtime := bc.logdir + "rtime"
+	rtimef, err := os.OpenFile(rtime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open rtime file", "error", err)
+	}
+	txLen := len(txs)
+	fmt.Fprintln(rtimef, refNum, txLen, block.Hash().Hex(), block.Root().Hex(), block.GasLimit(), block.GasUsed(), time.Now().Unix())
+	rtimef.Close()
+	return ireport
 }
 
 // CleanPendingTx removes commited cross-shard transactions

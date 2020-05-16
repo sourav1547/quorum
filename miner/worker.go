@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"sync"
@@ -153,21 +154,18 @@ type worker struct {
 	commitLock      sync.RWMutex                   // Lock to prevent concurrent access
 	crossTxsLock    sync.RWMutex
 
-	refCache   *core.ExecResult
-	refCacheMu sync.RWMutex
-
+	logdir        string
+	refCache      *core.ExecResult
+	refCacheMu    sync.RWMutex
 	foreignData   map[uint64]*types.DataCache
 	foreignDataMu sync.RWMutex
+	addrShardMap  map[common.Address]uint64 // Which commit address belong to which map!
 
-	addrShardMap map[common.Address]uint64 // Which commit address belong to which map!
-
-	rwLocked   map[common.Address]*types.CLock // Currently locked keys, to be used by rs nodes
-	rwLockedMu sync.RWMutex                    // Lock for lockedAddr
-
+	rwLocked      map[common.Address]*types.CLock    // Currently locked keys, to be used by rs nodes
+	rwLockedMu    sync.RWMutex                       // Lock for lockedAddr
 	lockedAddrMap map[uint64]map[common.Address]bool // shard: address mapping for locked contracts
-
-	cUnlocked map[common.Address]*types.CLock
-	cLocked   map[common.Address]*types.CLock
+	cUnlocked     map[common.Address]*types.CLock
+	cLocked       map[common.Address]*types.CLock
 
 	lastCommit map[uint64]*types.Commitment // To store the last rs block that includes a commit
 	lastCtx    map[uint64]uint64            // to store whether a shard is touched by a ctx or not
@@ -236,7 +234,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock, crossTxsLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock, crossTxsLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, logdir string) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -283,6 +281,7 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		pendingResultCh:    make(chan struct{}),
 		stopProcessCh:      make(chan struct{}),
 		addrShardMap:       make(map[common.Address]uint64),
+		logdir:             logdir,
 	}
 
 	worker.refCache = &core.ExecResult{
@@ -567,6 +566,15 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 				timestamp = time.Now().Unix()
 				if reorg {
 					if parentNum > commitNum {
+						// Logging re-org stats
+						reorg := w.logdir + "reorg"
+						reorgf, err := os.OpenFile(reorg, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+						if err != nil {
+							log.Error("Can't open rtime file", "error", err)
+						}
+						fmt.Fprintln(reorgf, newRefNum, parentNum, commitNum, time.Now().Unix())
+						reorgf.Close()
+						// Resetting trasnaction pool and chain head!
 						w.eth.TxPool().ResetHead(commitNum)
 						w.chain.SetHead(commitNum)
 						if h, ok := w.engine.(consensus.Handler); ok {

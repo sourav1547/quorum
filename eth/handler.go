@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -92,6 +93,7 @@ type ProtocolManager struct {
 	chainconfig *params.ChainConfig
 	maxPeers    int
 
+	logdir          string
 	downloader      *downloader.Downloader
 	rDownloader     *downloader.Downloader
 	fetcher         *fetcher.Fetcher
@@ -129,7 +131,7 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, chaindb, refdb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, chaindb, refdb ethdb.Database, raftMode bool, logdir string) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		numShard:      numShard,
@@ -155,6 +157,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 		rQuitSync:     make(chan struct{}),
 		raftMode:      raftMode,
 		engine:        engine,
+		logdir:        logdir,
 	}
 
 	// manager.shardAddMapLock.Lock()
@@ -971,6 +974,13 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		vals := request.Vals
 		log.Debug("Received response from", "pshard", p.Shard(), "num", refNum, "root", root)
 
+		dresp := pm.logdir + "dresp" // + strconv.Itoa(int(pm.myshard))
+		drespf, err := os.OpenFile(dresp, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Error("Can't open dresp file", "error", err)
+		}
+		fmt.Fprintln(drespf, refNum, p.Shard(), len(vals), root.Hex(), p.ID(), time.Now())
+		drespf.Close()
 		go pm.AddFetchedData(refNum, p.Shard(), vals)
 
 	default:
@@ -1064,9 +1074,16 @@ func (pm *ProtocolManager) FetchDataShard(refNum, shard uint64, root common.Hash
 		requestLen = len(peers)
 	}
 	requests := peers[:uint64(requestLen)]
+	dreq := pm.logdir + "dreq" // + strconv.Itoa(int(pm.myshard))
+	dreqf, err := os.OpenFile(dreq, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open dreqFile", "err", err)
+	}
 	for _, peer := range requests {
+		fmt.Fprintln(dreqf, refNum, shard, count, root.Hex(), peer.ID(), time.Now().Unix())
 		peer.SendDataRequest(refNum, count, root, keys)
 	}
+	dreqf.Close()
 	return
 }
 

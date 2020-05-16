@@ -116,6 +116,7 @@ type Ethereum struct {
 	gasPrice  *big.Int
 	etherbase common.Address
 
+	logdir        string
 	networkID     uint64
 	myShard       uint64
 	numShard      uint64
@@ -232,6 +233,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		eth.shardAddMap[i] = addr
 		log.Info("Address created for ", "shard", i, "address", common.BigToAddress(addr))
 	}
+	// eth.logdir = "/Users/sourav/rc/log/"
+	eth.logdir = "/mnt/ssd/rc/log/"
 
 	eth.myLatestCommit = &types.Commitment{Shard: config.MyShard, BlockNum: uint64(0), RefNum: uint64(0)} // Latest committed block
 	// force to set the istanbul etherbase to node key address
@@ -256,8 +259,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.commitLock, eth.rwLocked, eth.rwLockedMu, eth.lastCommit, eth.lastCtx, eth.lockedAddrMap)
-	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.commitLock, eth.rwLocked, eth.rwLockedMu, eth.lastCommit, eth.lastCtx, eth.lockedAddrMap)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.commitLock, eth.rwLocked, eth.rwLockedMu, eth.lastCommit, eth.lastCtx, eth.lockedAddrMap, eth.logdir)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.commitLock, eth.rwLocked, eth.rwLockedMu, eth.lastCommit, eth.lastCtx, eth.lockedAddrMap, eth.logdir)
 	if err != nil {
 		return nil, err
 	}
@@ -275,11 +278,11 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.refAddress, eth.myShard, eth.shardAddMap, eth.blockchain)
 
-	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.rEventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, eth.foreignData, eth.foreignDataMu, chainDb, refDb, config.RaftMode); err != nil {
+	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.rEventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, eth.foreignData, eth.foreignDataMu, chainDb, refDb, config.RaftMode, eth.logdir); err != nil {
 		return nil, err
 	}
 
-	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.commitLock, eth.crossTxsLock, eth.rwLocked, eth.rwLockedMu, eth.lastCommit, eth.lastCtx, eth.shardAddMap, eth.lockedAddrMap)
+	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.commitLock, eth.crossTxsLock, eth.rwLocked, eth.rwLockedMu, eth.lastCommit, eth.lastCtx, eth.shardAddMap, eth.lockedAddrMap, eth.logdir)
 	eth.miner.SetExtra(makeExtraData(config.MinerExtraData, eth.chainConfig.IsQuorum))
 
 	hexNodeId := fmt.Sprintf("%x", crypto.FromECDSAPub(&ctx.NodeKey().PublicKey)[1:]) // Quorum
