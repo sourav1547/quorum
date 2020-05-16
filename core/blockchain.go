@@ -1581,11 +1581,14 @@ func (bc *BlockChain) addNewLocks(allKeys map[uint64][]*types.CKeys) {
 			}
 			// Add lock to all keys
 			for _, key := range cKeys.Keys {
-				bc.rwLocked[addr].Keys[key] = false
+				if _, kok := bc.rwLocked[addr].Keys[key]; !kok {
+					bc.rwLocked[addr].Keys[key] = 0
+				}
+				bc.rwLocked[addr].Keys[key] = bc.rwLocked[addr].Keys[key] + 1
 			}
 			// Mark write locks
 			for _, key := range cKeys.WKeys {
-				bc.rwLocked[addr].Keys[key] = true
+				bc.rwLocked[addr].Keys[key] = -1
 			}
 		}
 	}

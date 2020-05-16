@@ -846,14 +846,14 @@ func (cm *Commitments) CommitNum(shard uint64) uint64 {
 type CLock struct {
 	Addr    common.Address
 	ClockMu sync.RWMutex
-	Keys    map[common.Hash]bool
+	Keys    map[common.Hash]int
 }
 
 // NewCLock creates a new lock instance for an address
 func NewCLock(addr common.Address) *CLock {
 	return &CLock{
 		Addr: addr,
-		Keys: make(map[common.Hash]bool),
+		Keys: make(map[common.Hash]int),
 	}
 }
 

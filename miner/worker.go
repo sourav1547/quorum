@@ -861,35 +861,6 @@ func (w *worker) resultLoop() {
 	}
 }
 
-func (w *worker) addNewLocks(allKeys map[uint64][]*types.CKeys) {
-	// This method assumes that the w.rwLockedMu lock is already held
-	var addr common.Address
-	for shard, sKeys := range allKeys {
-		if _, sok := w.lockedAddrMap[shard]; !sok {
-			w.lockedAddrMap[shard] = make(map[common.Address]bool)
-		}
-		// for every contract of a shard
-		for _, cKeys := range sKeys {
-			addr = cKeys.Addr
-			// Adding address to lockedAddrMap
-			if _, aok := w.rwLocked[addr]; !aok {
-				w.rwLocked[addr] = types.NewCLock(addr)
-			}
-			if _, aok := w.lockedAddrMap[shard][addr]; !aok {
-				w.lockedAddrMap[shard][addr] = false
-			}
-			// Add lock to all keys
-			for _, key := range cKeys.Keys {
-				w.rwLocked[addr].Keys[key] = false
-			}
-			// Mark write locks
-			for _, key := range cKeys.WKeys {
-				w.rwLocked[addr].Keys[key] = true
-			}
-		}
-	}
-}
-
 // Given a slice of public receipts and an overlapping (smaller) slice of
 // private receipts, return a new slice where the default for each location is
 // the public receipt but we take the private receipt in each place we have
@@ -1578,6 +1549,7 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 	if w.eth.MyShard() == uint64(0) {
 		// Resetting cLockedAddr and cUnlockedAddr
 		w.rwLockedMu.Lock()
+		defer w.rwLockedMu.Unlock()
 		w.cLocked = make(map[common.Address]*types.CLock)
 		w.cUnlocked = make(map[common.Address]*types.CLock)
 
@@ -1594,7 +1566,6 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 			commits := w.NewValidStateCommitments(stateTxs)
 			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, commits)
 			if w.commitTransactions(txs, w.coinbase, interrupt) {
-				w.rwLockedMu.Unlock()
 				return
 			}
 		}
@@ -1603,11 +1574,9 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 			ctxs := w.NewValidCrossTransactions(crossTxs)
 			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, ctxs)
 			if w.commitTransactions(txs, w.coinbase, interrupt) {
-				w.rwLockedMu.Unlock()
 				return
 			}
 		}
-		w.rwLockedMu.Unlock()
 	} else {
 		// Split the pending transactions into locals and remotes
 		localTxs, remoteTxs := make(map[common.Address]types.Transactions), pending
@@ -1751,10 +1720,13 @@ func (w *worker) updateLockStatus(allKeys map[uint64][]*types.CKeys) {
 				w.cLocked[addr] = types.NewCLock(addr)
 			}
 			for _, key := range cKeys.Keys {
-				w.cLocked[addr].Keys[key] = false
+				if _, kok := w.cLocked[addr].Keys[key]; !kok {
+					w.cLocked[addr].Keys[key] = 0
+				}
+				w.cLocked[addr].Keys[key] = w.cLocked[addr].Keys[key] + 1
 			}
 			for _, key := range cKeys.WKeys {
-				w.cLocked[addr].Keys[key] = true
+				w.cLocked[addr].Keys[key] = -1
 			}
 		}
 	}
@@ -1794,22 +1766,22 @@ func (w *worker) checkLockStatus(addr common.Address, addrKeys map[common.Hash]b
 		return false
 	}
 
-	// If currently locked on key
+	// If current locked on any key
 	if calok {
 		cLockedKeys := w.cLocked[addr].Keys
-		for key := range addrKeys {
-			// If already a write lock is acquired on any specific key
-			if cval, cok := cLockedKeys[key]; cok && cval {
+		for key, kval := range addrKeys {
+			if cval, cok := cLockedKeys[key]; cok && (cval < 0 || kval) {
 				return true
 			}
 		}
 	}
 
-	// Not unlocked and present in global lock
 	if _, ualok := w.cUnlocked[addr]; !ualok && galok {
 		gLockedKeys := w.rwLocked[addr].Keys
-		for key := range addrKeys {
-			if gval, gok := gLockedKeys[key]; gok && gval {
+		for key, kval := range addrKeys {
+			gval, gok := gLockedKeys[key]
+			// Globally locked and current write locked or globally write locked!
+			if gok && (kval || gval < 0) {
 				return true
 			}
 		}
