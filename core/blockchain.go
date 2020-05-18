@@ -1836,7 +1836,7 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) in
 					}
 					bc.pendingCrossTxs[refNum].AddTransaction(uint64(i), crossTx)
 					// Logging data!
-					fmt.Fprintln(ctxtimef, refNum, tx.Hash().Hex(), crossTx.Tx.Hash(), numShards, time.Now().Unix())
+					fmt.Fprintln(ctxtimef, refNum, tx.Hash().Hex(), crossTx.Tx.Hash().Hex(), numShards, time.Now().Unix())
 				}
 			} else if tx.TxType() == types.StateCommit {
 				shard, commit, report, root := types.DecodeStateCommit(tx)
