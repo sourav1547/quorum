@@ -234,7 +234,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		log.Info("Address created for ", "shard", i, "address", common.BigToAddress(addr))
 	}
 	// eth.logdir = "/Users/sourav/rc/log/"
-	eth.logdir = "/mnt/ssd/rc/log/"
+	eth.logdir = "/home/ubuntu/rc/log/"
 
 	eth.myLatestCommit = &types.Commitment{Shard: config.MyShard, BlockNum: uint64(0), RefNum: uint64(0)} // Latest committed block
 	// force to set the istanbul etherbase to node key address

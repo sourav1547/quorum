@@ -840,9 +840,12 @@ func (w *worker) resultLoop() {
 				continue
 			}
 
-			// Update locked status
 			if w.eth.MyShard() == uint64(0) {
+				// Update locked status
 				w.chain.UpdateRefStatus(block, task.receipts)
+			} else {
+				// Logging block infomation!
+				w.chain.LogData(true, block, task.receipts)
 			}
 			log.Info("Successfully sealed new block", "number", block.Number(), "sealhash", sealhash, "hash", hash, "root", block.Root(),
 				"elapsed", common.PrettyDuration(time.Since(task.createdAt)))
@@ -1563,6 +1566,11 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 
 		// Split the pending transactions into state commitment and cross-shard txs
 		stateTxs, crossTxs := make(map[common.Address]types.Transactions), pending
+		for account, txs := range crossTxs {
+			if len(txs) == 0 {
+				delete(crossTxs, account)
+			}
+		}
 		for _, account := range w.eth.TxPool().Shards() {
 			if txs := crossTxs[account]; len(txs) > 0 {
 				delete(crossTxs, account)
@@ -1588,6 +1596,11 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 	} else {
 		// Split the pending transactions into locals and remotes
 		localTxs, remoteTxs := make(map[common.Address]types.Transactions), pending
+		for account, txs := range remoteTxs {
+			if len(txs) == 0 {
+				delete(remoteTxs, account)
+			}
+		}
 		for _, account := range w.eth.TxPool().Locals() {
 			if txs := remoteTxs[account]; len(txs) > 0 {
 				delete(remoteTxs, account)

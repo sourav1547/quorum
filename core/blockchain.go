@@ -1611,6 +1611,13 @@ func (bc *BlockChain) LogData(self bool, block *types.Block, receipts types.Rece
 		log.Error("Can't open ltdata file", "error", err)
 	}
 	defer ltdataf.Close()
+	// Cross-shard Local data
+	csltime := bc.logdir + "csltime"
+	csltimef, err := os.OpenFile(csltime, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open csltime  file", "error", err)
+	}
+	defer csltimef.Close()
 	// Parsing transactions!
 	bNum := block.NumberU64()
 	rNum := block.RefNumberU64()
@@ -1620,6 +1627,9 @@ func (bc *BlockChain) LogData(self bool, block *types.Block, receipts types.Rece
 		receipt := receipts[i]
 		txLen++
 		fmt.Fprintln(ltdataf, bNum, rNum, tx.Hash().Hex(), tx.TxType(), receipt.Status, receipt.GasUsed, time.Now().Unix())
+		if tx.TxType() == types.CrossShardLocal {
+			fmt.Fprintln(csltimef, bNum, tx.Hash().Hex(), time.Now().Unix())
+		}
 	}
 	// Logging information about the block!
 	lbtime := bc.logdir + "lbtime"
