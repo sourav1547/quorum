@@ -1641,6 +1641,22 @@ func (bc *BlockChain) LogData(self bool, block *types.Block, receipts types.Rece
 	lbtimef.Close()
 }
 
+// CheckGLock checks whether the global lock is held or not!
+func (bc *BlockChain) CheckGLock(addr common.Address, addrKeys map[common.Hash]bool) bool {
+	bc.rwLockedMu.RLock()
+	defer bc.rwLockedMu.RUnlock()
+
+	gLockedKeys := bc.rwLocked[addr].Keys
+	for key, kval := range addrKeys {
+		gval, gok := gLockedKeys[key]
+		// Globally locked and current write locked or globally write locked!
+		if gok && (kval || gval < 0) {
+			return true
+		}
+	}
+	return false
+}
+
 // UpdateRefStatus updates current reference statsus
 func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipts) {
 	bc.rwLockedMu.Lock()

@@ -1798,14 +1798,17 @@ func (w *worker) checkLockStatus(addr common.Address, addrKeys map[common.Hash]b
 	}
 
 	if _, ualok := w.cUnlocked[addr]; !ualok && galok {
-		gLockedKeys := w.rwLocked[addr].Keys
-		for key, kval := range addrKeys {
-			gval, gok := gLockedKeys[key]
-			// Globally locked and current write locked or globally write locked!
-			if gok && (kval || gval < 0) {
-				return true
-			}
+		if w.chain.CheckGLock(addr, addrKeys) {
+			return true
 		}
+		// gLockedKeys := w.rwLocked[addr].Keys
+		// for key, kval := range addrKeys {
+		// 	gval, gok := gLockedKeys[key]
+		// 	// Globally locked and current write locked or globally write locked!
+		// 	if gok && (kval || gval < 0) {
+		// 		return true
+		// 	}
+		// }
 	}
 	// Either unlocked or not present in global lock
 	return false
