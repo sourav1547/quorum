@@ -55,5 +55,3 @@ type ChainSideEvent struct {
 }
 
 type ChainHeadEvent struct{ Block *types.Block }
-
-type CommitHeadEvent struct{ RefReport uint64 }

@@ -73,13 +73,10 @@ type Ethereum struct {
 	shutdownChan chan bool // Channel for shutting down the Ethereum
 
 	pendingCrossTxs map[uint64]types.CrossShardTxs // Pending Cross shard transactions
-	crossTxsLock    sync.RWMutex                   // Lock for pendingCrossTs
 	commitments     map[uint64]*types.Commitments  // Known commitments for each shard
 	myLatestCommit  *types.Commitment              // Latest committed block
-	commitLock      sync.RWMutex                   // Lock for myLatestCommit
 
-	rwLocked   map[common.Address]*types.CLock
-	rwLockedMu sync.RWMutex
+	gLocked *types.RWLock
 
 	lockedAddrMap map[uint64]map[common.Address]bool // to store locked address of each shard
 
@@ -209,13 +206,10 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		pendingCrossTxs: make(map[uint64]types.CrossShardTxs),
 		commitments:     make(map[uint64]*types.Commitments),
 		foreignData:     make(map[uint64]*types.DataCache),
-		rwLocked:        make(map[common.Address]*types.CLock),
+		gLocked:         types.NewRWLock(),
 		lastCtx:         make(map[uint64]uint64),
 		lastCommit:      make(map[uint64]*types.Commitment),
 		lockedAddrMap:   make(map[uint64]map[common.Address]bool),
-		commitLock:      sync.RWMutex{},
-		crossTxsLock:    sync.RWMutex{},
-		rwLockedMu:      sync.RWMutex{},
 		foreignDataMu:   sync.RWMutex{},
 	}
 
@@ -259,8 +253,8 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.commitLock, eth.rwLocked, eth.rwLockedMu, eth.lastCommit, eth.lastCtx, eth.lockedAddrMap, eth.logdir)
-	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.commitLock, eth.rwLocked, eth.rwLockedMu, eth.lastCommit, eth.lastCtx, eth.lockedAddrMap, eth.logdir)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, false, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.gLocked, eth.lastCommit, eth.lastCtx, eth.lockedAddrMap, eth.logdir)
+	eth.refchain, rerr = core.NewBlockChain(refDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig, eth.shouldPreserve, true, config.MyShard, config.NumShard, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.gLocked, eth.lastCommit, eth.lastCtx, eth.lockedAddrMap, eth.logdir)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +276,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		return nil, err
 	}
 
-	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.pendingCrossTxs, eth.myLatestCommit, eth.foreignData, eth.foreignDataMu, eth.commitLock, eth.crossTxsLock, eth.rwLocked, eth.rwLockedMu, eth.lastCommit, eth.lastCtx, eth.shardAddMap, eth.lockedAddrMap, eth.logdir)
+	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.foreignData, eth.foreignDataMu, eth.gLocked, eth.lastCommit, eth.lastCtx, eth.shardAddMap, eth.lockedAddrMap, eth.logdir)
 	eth.miner.SetExtra(makeExtraData(config.MinerExtraData, eth.chainConfig.IsQuorum))
 
 	hexNodeId := fmt.Sprintf("%x", crypto.FromECDSAPub(&ctx.NodeKey().PublicKey)[1:]) // Quorum

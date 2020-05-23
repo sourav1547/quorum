@@ -16,6 +16,6 @@ func EmitCheckpoint(checkpointName string, logValues ...interface{}) {
 	args := []interface{}{"name", checkpointName}
 	args = append(args, logValues...)
 	if DoEmitCheckpoints {
-		Info("QUORUM-CHECKPOINT", args...)
+		Debug("QUORUM-CHECKPOINT", args...)
 	}
 }

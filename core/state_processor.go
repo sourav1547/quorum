@@ -81,19 +81,14 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 		snap := statedb.Snapshot()
 		psnap := privateState.Snapshot()
 
-		if txType != types.CrossShardLocal {
-			dc = nil
-		} else {
+		dc = nil
+		if txType == types.CrossShardLocal {
+			found := false
 			for curr <= end {
-				found := false
-				// @sourav, todo: Add locks for pendingCrossTxs map
-				for _, ctx := range p.bc.pendingCrossTxs[curr].Txs {
+				for _, ctx := range p.bc.CrossTxs(curr).Txs {
 					if tx.Hash() == ctx.Tx.Hash() {
-						p.bc.foreignDataMu.RLock()
-						dc = p.bc.foreignData[curr]
-						p.bc.foreignDataMu.RUnlock()
+						dc, _ = p.bc.Dc(curr)
 						found = true
-						log.Debug("Cross shard Transaction with", "hash", tx.Hash(), "refNum", curr)
 						break
 					}
 				}
@@ -108,7 +103,7 @@ func (p *StateProcessor) Process(block *types.Block, start, end uint64, statedb,
 		if txType == types.CrossShardLocal && err != nil {
 			statedb.RevertToSnapshot(snap)
 			privateState.RevertToSnapshot(psnap)
-			log.Warn("Error cross shard local transaction", "thash", tx.Hash(), "from", tx.From(), "error", err)
+			log.Debug("Error cross shard local transaction", "thash", tx.Hash(), "from", tx.From(), "error", err)
 
 			// Creating a dummy receipt
 			root := statedb.IntermediateRoot(false)

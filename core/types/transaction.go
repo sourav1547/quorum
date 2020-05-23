@@ -842,6 +842,27 @@ func (cm *Commitments) CommitNum(shard uint64) uint64 {
 	return uint64(0)
 }
 
+// RWLock stores read write locks
+type RWLock struct {
+	Mu    sync.RWMutex
+	Locks map[common.Address]*CLock
+}
+
+// NewRWLock creates new instance of RWLock
+func NewRWLock() *RWLock {
+	return &RWLock{
+		Mu:    sync.RWMutex{},
+		Locks: make(map[common.Address]*CLock),
+	}
+}
+
+// ResetLock cleans existing values
+func (rwl *RWLock) ResetLock() {
+	rwl.Mu.Lock()
+	defer rwl.Mu.Unlock()
+	rwl.Locks = make(map[common.Address]*CLock)
+}
+
 // CLock stores currently locked keys of a contract
 type CLock struct {
 	Addr    common.Address

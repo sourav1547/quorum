@@ -54,9 +54,6 @@ const (
 	// chainSideChanSize is the size of channel listening to ChainSideEvent.
 	chainSideChanSize = 10
 
-	// chainCommitChanSize to listen to CommitHeadEvent
-	chainCommitChanSize = 2
-
 	// resubmitAdjustChanSize is the size of resubmitting interval adjustment channel.
 	resubmitAdjustChanSize = 10
 
@@ -87,7 +84,6 @@ const (
 type environment struct {
 	signer types.Signer
 
-	dc        *types.DataCache
 	state     *state.StateDB // apply state changes here
 	ancestors mapset.Set     // ancestor set (used for checking uncle parent validity)
 	family    mapset.Set     // family set (used for checking uncle invalidity)
@@ -144,25 +140,16 @@ type worker struct {
 	eth    Backend
 	chain  *core.BlockChain
 
-	refHashLock     sync.RWMutex
-	refNumberLock   sync.RWMutex
-	refHash         common.Hash                    // Hash of the last knwon reference block
-	refNumber       *big.Int                       // Last know reference block
-	pendingCrossTxs map[uint64]types.CrossShardTxs // Pending Cross shard transactions
-	commitments     map[uint64]*types.Commitments  // Known commitments for each shard
-	myLatestCommit  *types.Commitment              // Latest committed block
-	commitLock      sync.RWMutex                   // Lock to prevent concurrent access
-	crossTxsLock    sync.RWMutex
+	refHash     common.Hash                   // Hash of the last knwon reference block
+	refNumber   uint64                        // Last know reference block
+	commitments map[uint64]*types.Commitments // Known commitments for each shard
 
 	logdir        string
-	refCache      *core.ExecResult
-	refCacheMu    sync.RWMutex
 	foreignData   map[uint64]*types.DataCache
 	foreignDataMu sync.RWMutex
 	addrShardMap  map[common.Address]uint64 // Which commit address belong to which map!
 
-	rwLocked      map[common.Address]*types.CLock    // Currently locked keys, to be used by rs nodes
-	rwLockedMu    sync.RWMutex                       // Lock for lockedAddr
+	gLocked       *types.RWLock                      // Currently locked keys, to be used by rs nodes
 	lockedAddrMap map[uint64]map[common.Address]bool // shard: address mapping for locked contracts
 	cUnlocked     map[common.Address]*types.CLock
 	cLocked       map[common.Address]*types.CLock
@@ -192,8 +179,6 @@ type worker struct {
 	rChainHeadSub event.Subscription
 	chainSideCh   chan core.ChainSideEvent
 	chainSideSub  event.Subscription
-	commitHeadCh  chan core.CommitHeadEvent
-	commitHeadSub event.Subscription
 
 	// Channels
 	newWorkCh          chan *newWorkReq
@@ -234,14 +219,14 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, pendingCrossTxs map[uint64]types.CrossShardTxs, myLatestCommit *types.Commitment, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, commitLock, crossTxsLock sync.RWMutex, rwLocked map[common.Address]*types.CLock, rwLockedMu sync.RWMutex, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, logdir string) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, gLocked *types.RWLock, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, logdir string) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
 		eth:                eth,
 		mux:                mux,
 		chain:              eth.BlockChain(),
-		refNumber:          big.NewInt(0),
+		refNumber:          0,
 		refHash:            eth.BlockChain().GetGenesisHash(),
 		gasFloor:           gasFloor,
 		gasCeil:            gasCeil,
@@ -254,7 +239,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		chainHeadCh:        make(chan core.ChainHeadEvent, chainHeadChanSize),
 		rChainHeadCh:       make(chan core.ChainHeadEvent, chainHeadChanSize),
 		chainSideCh:        make(chan core.ChainSideEvent, chainSideChanSize),
-		commitHeadCh:       make(chan core.CommitHeadEvent, chainCommitChanSize),
 		newWorkCh:          make(chan *newWorkReq),
 		taskCh:             make(chan *task),
 		resultCh:           make(chan *types.Block, resultQueueSize),
@@ -263,15 +247,10 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		resubmitIntervalCh: make(chan time.Duration),
 		resubmitAdjustCh:   make(chan *intervalAdjust, resubmitAdjustChanSize),
 		commitments:        commitments,
-		pendingCrossTxs:    pendingCrossTxs,
-		myLatestCommit:     myLatestCommit,
 		foreignData:        foreignData,
 		foreignDataMu:      foreignDataMu,
 		foreignDataCh:      make(chan core.ForeignDataEvent),
-		commitLock:         commitLock,
-		crossTxsLock:       crossTxsLock,
-		rwLocked:           rwLocked,
-		rwLockedMu:         rwLockedMu,
+		gLocked:            gLocked,
 		cLocked:            make(map[common.Address]*types.CLock),
 		cUnlocked:          make(map[common.Address]*types.CLock),
 		lastCommit:         lastCommit,
@@ -284,16 +263,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		logdir:             logdir,
 	}
 
-	worker.refCache = &core.ExecResult{
-		RefNum:    uint64(0),
-		GasUsed:   uint64(0),
-		Txs:       []*types.Transaction{},
-		Receipts:  []*types.Receipt{},
-		State:     nil,
-		CreatedAt: time.Now(),
-		Tcount:    0,
-	}
-
 	if _, ok := engine.(consensus.Istanbul); ok || !config.IsQuorum || config.Clique != nil {
 		// Subscribe NewTxsEvent for tx pool
 		worker.txsSub = eth.TxPool().SubscribeNewTxsEvent(worker.txsCh)
@@ -301,7 +270,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		worker.chainHeadSub = eth.BlockChain().SubscribeChainHeadEvent(worker.chainHeadCh)
 		worker.chainSideSub = eth.BlockChain().SubscribeChainSideEvent(worker.chainSideCh)
 		worker.rChainHeadSub = eth.RefChain().SubscribeChainHeadEvent(worker.rChainHeadCh)
-		worker.commitHeadSub = eth.RefChain().SubscribeCommitHeadEvent(worker.commitHeadCh)
 		worker.foreignDataSub = eth.BlockChain().SubscribeForeignDataEvent(worker.foreignDataCh)
 
 		// Fixing the gas limit for the entire blockchain.
@@ -326,9 +294,9 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		go worker.newWorkLoop(recommit)
 		go worker.resultLoop()
 		go worker.taskLoop()
-		if worker.eth.MyShard() > uint64(0) {
-			go worker.crossTaskLoop()
-		}
+		// if worker.eth.MyShard() > uint64(0) {
+		// 	go worker.crossTaskLoop()
+		// }
 
 		// Submit first work to initialize pending state.
 		worker.startCh <- struct{}{}
@@ -337,52 +305,13 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 	return worker
 }
 
-func (w *worker) commitNum() uint64 {
-	w.commitLock.RLock()
-	defer w.commitLock.RUnlock()
-	return w.myLatestCommit.BlockNum
-}
-
-func (w *worker) commitRefNum() uint64 {
-	w.commitLock.RLock()
-	defer w.commitLock.RUnlock()
-	return w.myLatestCommit.RefNum
-}
-
-func (w *worker) commitRoot() common.Hash {
-	w.commitLock.RLock()
-	defer w.commitLock.RUnlock()
-	return w.myLatestCommit.StateRoot
-}
-
-func (w *worker) getRefNumber() *big.Int {
-	w.refNumberLock.RLock()
-	defer w.refNumberLock.RUnlock()
-	return w.refNumber
-}
-
-func (w *worker) getRefNumberU64() uint64 {
-	w.refNumberLock.RLock()
-	defer w.refNumberLock.RUnlock()
-	return w.refNumber.Uint64()
-}
-
-func (w *worker) getRefHash() common.Hash {
-	w.refHashLock.RLock()
-	defer w.refHashLock.RUnlock()
-	return w.refHash
-}
-
-func (w *worker) setRefNumber(num *big.Int) {
-	w.refNumberLock.Lock()
-	defer w.refNumberLock.Unlock()
-	w.refNumber = num
-}
-
-func (w *worker) setRefHash(hash common.Hash) {
-	w.refHashLock.Lock()
-	defer w.refHashLock.Unlock()
-	w.refHash = hash
+// Notifys the consensus engine about the change in block!
+func (w *worker) NotifyUpdate(block *types.Block) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.mux.Post(core.NewRefBlockEvent{Start: w.refNumber, End: block.NumberU64()})
+	w.refNumber = block.Number().Uint64()
+	w.refHash = block.Hash()
 }
 
 // setEtherbase sets the etherbase used to initialize the block coinbase field.
@@ -519,29 +448,17 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			timestamp = time.Now().Unix()
 			commit(false, false, commitInterruptNewHead)
 
-		case report := <-w.commitHeadCh:
-			select {
-			case w.stopProcessCh <- struct{}{}:
-			default:
-			}
-			w.refCacheMu.Lock()
-			w.refCache.Reset(report.RefReport)
-			w.refCacheMu.Unlock()
-
 		case head := <-w.rChainHeadCh:
 			block := head.Block
-			w.mux.Post(core.NewRefBlockEvent{Start: w.getRefNumberU64(), End: block.NumberU64()})
-			w.setRefNumber(block.Number())
-			w.setRefHash(block.Hash())
+			w.NotifyUpdate(block)
 
 			parentBlock := w.chain.CurrentBlock() // last known block
 			parentNum := parentBlock.NumberU64()  // last known block height
-			commitNum := w.commitNum()            // last commit height
+			commitNum := w.chain.CommitNum()      // last commit height
 
 			// Proceed if and only if current know block is at a height
 			// greater than last committed height
 			if parentNum >= commitNum {
-
 				// Processing cross-shard transaction makes sense
 				// if and only if last committed block is alread known.
 				select {
@@ -553,11 +470,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 				reorg := false
 				newRefNum := block.NumberU64()
 				for curRefNum <= newRefNum {
-					w.crossTxsLock.RLock()
-					ctx := w.pendingCrossTxs[curRefNum]
-					w.crossTxsLock.RUnlock()
-					len := ctx.TxCount()
-					if len > 0 {
+					if w.chain.CtxExist(curRefNum) {
 						reorg = true
 						break
 					}
@@ -642,7 +555,6 @@ func (w *worker) mainLoop() {
 	defer w.chainHeadSub.Unsubscribe()
 	defer w.chainSideSub.Unsubscribe()
 	defer w.rChainHeadSub.Unsubscribe()
-	defer w.commitHeadSub.Unsubscribe()
 	defer w.foreignDataSub.Unsubscribe()
 
 	for {
@@ -726,8 +638,6 @@ func (w *worker) mainLoop() {
 		case <-w.rChainHeadSub.Err():
 			return
 		case <-w.chainSideSub.Err():
-			return
-		case <-w.commitHeadSub.Err():
 			return
 		}
 	}
@@ -893,167 +803,40 @@ func mergeReceipts(pub, priv types.Receipts) types.Receipts {
 	return ret
 }
 
-// prevTaskLoop is a standalone goroutine to execute contract transactions of previous blocks
-func (w *worker) crossTaskLoop() {
-	for {
-		select {
-		case <-w.crossWorkCh:
-			w.processingMu.Lock()
-			if atomic.LoadInt32(&w.processing) == 0 {
-				atomic.StoreInt32(&w.processing, 1)
-				w.processingMu.Unlock()
-				go w.processCrossTxs()
-			} else {
-				w.processingMu.Unlock()
-			}
-		case <-w.exitCh:
-			return
-		}
-	}
-}
-
-func (w *worker) processCrossTxs() {
-	defer atomic.StoreInt32(&w.processing, 0)
-
-	root := w.commitRoot()
-	publicState, _, err := w.chain.StateAt(root)
-	if err != nil {
-		log.Error("Error in fetching state!", "root", root)
-		return
-	}
-
-	w.refCacheMu.Lock()
-	if w.refCache.State == nil {
-		w.refCache.State = publicState.Copy()
-	}
-	current := w.refCache.RefNum + uint64(1)
-	w.refCacheMu.Unlock()
-
-	refNum := w.getRefNumberU64()
-	for current <= refNum {
-		w.foreignDataMu.RLock()
-		dc := w.foreignData[current]
-		w.foreignDataMu.RUnlock()
-		status := false
-		if dc != nil {
-			dc.DataCacheMu.RLock()
-			status = dc.Status
-			dc.DataCacheMu.RUnlock()
-		}
-		if !status {
-			select {
-			case <-w.foreignDataCh:
-				refNum = w.getRefNumberU64()
-			case <-w.stopProcessCh:
-				return
-			}
-		} else {
-			err := w.commitPendingBlock(current, dc)
-			if err == nil {
-				select {
-				case w.pendingResultCh <- struct{}{}:
-				default:
-				}
-			}
-			current = current + 1
-			refNum = w.getRefNumberU64()
-		}
-	}
-	return
-}
-
-func (w *worker) commitPendingBlock(work uint64, dc *types.DataCache) error {
-
-	commitNum := w.commitNum()
-	commitBlock := w.chain.GetBlockByNumber(commitNum)
-	if commitBlock == nil {
-		log.Error("Last committed block not found!")
-	}
-	bCommitNum := commitBlock.Number()
-
-	privateState, err := w.chain.PrivateStateAt(w.commitRoot())
-	if err != nil {
-		return err
-	}
-
-	w.refCacheMu.RLock()
-	env := &environment{
-		signer:       types.MakeSigner(w.config, bCommitNum),
-		dc:           dc,
-		state:        w.refCache.State,
-		privateState: privateState,
-		txs:          w.refCache.Txs,
-		receipts:     w.refCache.Receipts,
-		tcount:       w.refCache.Tcount,
-		gasPool:      new(core.GasPool).AddGas(w.gasLimit),
-	}
-
-	start := w.refCache.State.Copy()
-	// Temporary header for transaction execution.
-	header := &types.Header{
-		ParentHash: commitBlock.Hash(),
-		Number:     bCommitNum.Add(bCommitNum, big.NewInt(1)),
-		Shard:      w.eth.MyShard(),
-		GasLimit:   w.gasLimit,
-		Extra:      w.extra,
-		Time:       big.NewInt(time.Now().Unix()),
-		GasUsed:    w.refCache.GasUsed,
-	}
-	w.refCacheMu.RUnlock()
-
+func (w *worker) commitPendingBlock(work uint64, env *environment, dc *types.DataCache) error {
+	// This function assumes that w.mu.RLock is already held!
 	if w.isRunning() {
 		if w.coinbase == (common.Address{}) {
 			log.Error("Refusing to mine without etherbase")
 			return nil
 		}
-		header.Coinbase = w.coinbase
-	}
-	if err := w.engine.Prepare(w.chain, header); err != nil {
-		log.Error("Failed to prepare header for mining", "err", err)
-		return err
+		env.header.Coinbase = w.coinbase
 	}
 
-	w.crossTxsLock.RLock()
-	cTxs := w.pendingCrossTxs[work]
-	w.crossTxsLock.RUnlock()
+	cTxs := w.chain.CrossTxsLocked(work) // This function internaly acquires lock!
 	for _, ctx := range cTxs.Txs {
 		tx := ctx.Tx
 		env.state.Prepare(tx.Hash(), common.Hash{}, env.tcount)
 		env.privateState.Prepare(tx.Hash(), common.Hash{}, env.tcount)
-		w.commitPendingTransaction(tx, header, env)
+		w.commitPendingTransaction(tx, env, dc)
 		env.tcount++
 	}
-
-	w.refCacheMu.Lock()
-	w.refCache = &core.ExecResult{
-		RefNum:    work,
-		Txs:       env.txs,
-		Receipts:  env.receipts,
-		GasUsed:   header.GasUsed,
-		Tcount:    env.tcount,
-		State:     env.state,
-		CreatedAt: time.Now(),
-	}
-	w.refCacheMu.Unlock()
-
-	log.Debug("Worker finished processing reference", "number", work, "gu", header.GasUsed, "start",
-		start.IntermediateRoot(false), "result", env.state.IntermediateRoot(false))
 	return nil
 }
 
-func (w *worker) commitPendingTransaction(tx *types.Transaction, header *types.Header, env *environment) ([]*types.Log, error) {
+func (w *worker) commitPendingTransaction(tx *types.Transaction, env *environment, dc *types.DataCache) ([]*types.Log, error) {
 	snap := env.state.Snapshot()
 	psnap := env.privateState.Snapshot()
 	coinbase := w.coinbase
-	receipt, _, _, err := core.ApplyTransaction(w.config, w.chain, &coinbase, env.gasPool, env.dc, env.state, env.privateState, header, tx, &header.GasUsed, vm.Config{})
+	receipt, _, _, err := core.ApplyTransaction(w.config, w.chain, &coinbase, env.gasPool, dc, env.state, env.privateState, env.header, tx, &env.header.GasUsed, vm.Config{})
 	if err != nil {
 		env.state.RevertToSnapshot(snap)
 		env.privateState.RevertToSnapshot(psnap)
-		log.Info("Skipping pending transaction", "thash", tx.Hash(), "error", err)
+		log.Debug("Skipping pending transaction", "thash", tx.Hash(), "error", err)
 
 		// Create a dummy recipt if the transaction failed
 		root := env.state.IntermediateRoot(false)
-		receipt = types.NewReceipt(root.Bytes(), true, header.GasUsed)
+		receipt = types.NewReceipt(root.Bytes(), true, env.header.GasUsed)
 		receipt.TxHash = tx.Hash()
 		receipt.GasUsed = tx.Gas()
 		// Set the receipt logs and create a bloom for filtering
@@ -1069,67 +852,41 @@ func (w *worker) commitPendingTransaction(tx *types.Transaction, header *types.H
 
 // makeCurrent creates a new environment for the current cycle.
 func (w *worker) makeCurrent(reorg bool, parent *types.Block, header *types.Header) error {
-
-	var env *environment
-
-	if reorg {
-		var refNum uint64
-		for {
-			refNum = w.getRefNumberU64()
-			w.refCacheMu.RLock()
-			processedRef := w.refCache.RefNum
-			if processedRef == refNum {
-				header.GasUsed = w.refCache.GasUsed
-				w.refCacheMu.RUnlock()
-				break
-			} else {
-				w.refCacheMu.RUnlock()
-			}
-			select {
-			case <-w.pendingResultCh:
-				continue
-			}
-		}
-
-		log.Debug("Initial config for block with", "parent", parent.NumberU64(), "rn", refNum, "gasUsed", header.GasUsed, "start", w.refCache.State.IntermediateRoot(false))
-		privateState, err := w.chain.PrivateStateAt(parent.Root())
-		if err != nil {
-			log.Error("Private state nil", "bn", parent.NumberU64(), "bh", parent.Root())
-			return err
-		}
-
-		rCopy := make([]*types.Receipt, w.refCache.Tcount)
-		copy(rCopy, w.refCache.Receipts)
-		txCopy := make([]*types.Transaction, w.refCache.Tcount)
-		copy(txCopy, w.refCache.Txs)
-		env = &environment{
-			signer:       types.MakeSigner(w.config, header.Number),
-			state:        w.refCache.State.Copy(),
-			ancestors:    mapset.NewSet(),
-			family:       mapset.NewSet(),
-			uncles:       mapset.NewSet(),
-			header:       header,
-			privateState: privateState,
-			receipts:     rCopy,
-			txs:          txCopy,
-			tcount:       w.refCache.Tcount,
-		}
-	} else {
-		publicState, privateState, err := w.chain.StateAt(parent.Root())
-		if err != nil {
-			return err
-		}
-		env = &environment{
-			signer:       types.MakeSigner(w.config, header.Number),
-			state:        publicState,
-			ancestors:    mapset.NewSet(),
-			family:       mapset.NewSet(),
-			uncles:       mapset.NewSet(),
-			header:       header,
-			privateState: privateState,
-		}
+	publicState, privateState, err := w.chain.StateAt(parent.Root())
+	if err != nil {
+		return err
+	}
+	env := &environment{
+		signer:       types.MakeSigner(w.config, header.Number),
+		state:        publicState,
+		ancestors:    mapset.NewSet(),
+		family:       mapset.NewSet(),
+		uncles:       mapset.NewSet(),
+		header:       header,
+		privateState: privateState,
+		tcount:       0,
+		gasPool:      new(core.GasPool).AddGas(w.gasLimit),
 	}
 
+	if reorg {
+		// Start and Ref ref number to process!
+		start := parent.RefNumberU64() + uint64(1)
+		end := header.RefNumber.Uint64()
+		curr := start
+		for curr <= end {
+			dc, status := w.chain.Dc(curr)
+			if !status {
+				select {
+				case <-w.foreignDataCh:
+					continue
+				}
+			}
+			if err := w.commitPendingBlock(curr, env, dc); err != nil {
+				return err
+			}
+			curr++
+		}
+	}
 	// when 08 is processed ancestors contain 07 (quick block)
 	for _, ancestor := range w.chain.GetBlocksFromHash(parent.Hash(), 7) {
 		for _, uncle := range ancestor.Uncles() {
@@ -1461,8 +1218,8 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 	header := &types.Header{
 		ParentHash: parent.Hash(),
 		Number:     num.Add(num, common.Big1),
-		RefNumber:  w.getRefNumber(),
-		RefHash:    w.getRefHash(),
+		RefNumber:  big.NewInt(int64(w.refNumber)),
+		RefHash:    w.refHash,
 		Shard:      w.eth.MyShard(),
 		GasLimit:   w.gasLimit,
 		Extra:      w.extra,
@@ -1558,9 +1315,8 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 	}
 
 	if w.eth.MyShard() == uint64(0) {
-		// Resetting cLockedAddr and cUnlockedAddr
-		w.rwLockedMu.Lock()
-		defer w.rwLockedMu.Unlock()
+		// Resetting cLockedAddr and cUnlockedAdd
+		w.gLocked.Mu.Lock()
 		w.cLocked = make(map[common.Address]*types.CLock)
 		w.cUnlocked = make(map[common.Address]*types.CLock)
 
@@ -1582,6 +1338,7 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 			commits := w.NewValidStateCommitments(stateTxs)
 			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, commits)
 			if w.commitTransactions(txs, w.coinbase, interrupt) {
+				w.gLocked.Mu.Unlock()
 				return
 			}
 		}
@@ -1590,9 +1347,12 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 			ctxs := w.NewValidCrossTransactions(crossTxs)
 			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, ctxs)
 			if w.commitTransactions(txs, w.coinbase, interrupt) {
+				log.Error("Error in commit Transactions, returning!")
+				w.gLocked.Mu.Unlock()
 				return
 			}
 		}
+		w.gLocked.Mu.Unlock()
 	} else {
 		// Split the pending transactions into locals and remotes
 		localTxs, remoteTxs := make(map[common.Address]types.Transactions), pending
@@ -1625,6 +1385,7 @@ func (w *worker) commitNewWork(reorg bool, interrupt *int32, noempty bool, times
 
 // NewValidStateCommitments to filter invalid state commitments
 func (w *worker) NewValidStateCommitments(stateTxs map[common.Address]types.Transactions) map[common.Address]types.Transactions {
+	// This function assumes that gLocked.Mu lock is already held!
 	var (
 		newCommits     = make(map[common.Address]types.Transactions)
 		shard          uint64
@@ -1671,6 +1432,7 @@ func (w *worker) NewValidStateCommitments(stateTxs map[common.Address]types.Tran
 
 // unlockKeys ulocks currently locked key
 func (w *worker) unlockKeys(shard uint64) {
+	// This function assumes that gLocked.Mu is already held!
 	lockedAddrs := w.lockedAddrMap[shard] // list of currently locked address of a shard
 	// If no locked address for a particular shard, then return
 	if len(lockedAddrs) > 0 {
@@ -1686,6 +1448,7 @@ func (w *worker) unlockKeys(shard uint64) {
 
 // NewValidCrossTransactions extracts the current valid cross-shard transactions
 func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Transactions) map[common.Address]types.Transactions {
+	// This function assumes thta w.gLocked.Mu lock is already held!
 	var (
 		newCtxs  = make(map[common.Address]types.Transactions)
 		numShard int
@@ -1705,7 +1468,7 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 				others = others + 1
 				continue
 			}
-			if w.chain.IsProcessedLocked(tx.Hash()) {
+			if w.chain.IsProcessed(tx.Hash()) {
 				others = others + 1
 				continue
 			}
@@ -1733,7 +1496,7 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 
 // updateLockStatus temporarily locks additional keys
 func (w *worker) updateLockStatus(allKeys map[uint64][]*types.CKeys) {
-	// This method assumes that the w.rwLockedMu method is already held
+	// This method assumes that the w.gLocked.Mu method is already held
 	for _, shardKeys := range allKeys {
 		for _, cKeys := range shardKeys {
 			addr := cKeys.Addr
@@ -1755,7 +1518,7 @@ func (w *worker) updateLockStatus(allKeys map[uint64][]*types.CKeys) {
 
 // checkTxStatus returns true if the transaction is eligible, otherwise return false
 func (w *worker) checkTxStatus(allKeys map[uint64][]*types.CKeys) bool {
-	// This method assumes that the w.rwLockedMu method is already held
+	// This method assumes that the w.gLocked.Mu method is already held
 	for _, shardKeys := range allKeys {
 		for _, cKeys := range shardKeys {
 			addr := cKeys.Addr
@@ -1778,9 +1541,9 @@ func (w *worker) checkTxStatus(allKeys map[uint64][]*types.CKeys) bool {
 // To check whether any key of a particular contract is locked; return true if locked
 // otherwise return false
 func (w *worker) checkLockStatus(addr common.Address, addrKeys map[common.Hash]bool) bool {
-	// This method assumes that w.rwLockedMu is held
-	_, galok := w.rwLocked[addr] // globally locked
-	_, calok := w.cLocked[addr]  // locally locked
+	// This method assumes that w.gLocked.Mu is held
+	_, galok := w.gLocked.Locks[addr] // globally locked
+	_, calok := w.cLocked[addr]       // locally locked
 
 	// Contract not locked
 	if !galok && !calok {
@@ -1801,14 +1564,6 @@ func (w *worker) checkLockStatus(addr common.Address, addrKeys map[common.Hash]b
 		if w.chain.CheckGLock(addr, addrKeys) {
 			return true
 		}
-		// gLockedKeys := w.rwLocked[addr].Keys
-		// for key, kval := range addrKeys {
-		// 	gval, gok := gLockedKeys[key]
-		// 	// Globally locked and current write locked or globally write locked!
-		// 	if gok && (kval || gval < 0) {
-		// 		return true
-		// 	}
-		// }
 	}
 	// Either unlocked or not present in global lock
 	return false
