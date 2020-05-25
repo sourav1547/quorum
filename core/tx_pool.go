@@ -786,17 +786,17 @@ func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, er
 	from, _ := types.Sender(pool.signer, tx) // already validated
 	txType := tx.TxType()
 	if pool.queue[from] == nil {
-		pool.queue[from] = newTxList(true)
+		pool.queue[from] = newTxList(false)
 	}
 	if pool.pending[from] == nil {
-		pool.pending[from] = newTxList(true)
+		pool.pending[from] = newTxList(false)
 	}
 
 	var (
 		inserted bool
 		old      *types.Transaction
 	)
-	if txType == types.CrossShard {
+	if txType == types.CrossShard || txType == types.StateCommit {
 		inserted, old = pool.pending[from].Add(tx, pool.config.PriceBump)
 		go pool.txFeed.Send(NewTxsEvent{types.Transactions{tx}})
 	} else {
@@ -1286,7 +1286,7 @@ func (pool *TxPool) demoteUnexecutables() {
 		if list.Len() > 0 && list.txs.Get(nonce) == nil {
 			for _, tx := range list.Cap(0) {
 				hash := tx.Hash()
-				log.Error("Demoting invalidated transaction", "hash", hash)
+				log.Debug("Demoting invalidated transaction", "type", tx.TxType(), "hash", hash, "nonce", tx.Nonce())
 				pool.enqueueTx(hash, tx)
 			}
 		}

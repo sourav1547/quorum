@@ -144,10 +144,8 @@ type worker struct {
 	refNumber   uint64                        // Last know reference block
 	commitments map[uint64]*types.Commitments // Known commitments for each shard
 
-	logdir        string
-	foreignData   map[uint64]*types.DataCache
-	foreignDataMu sync.RWMutex
-	addrShardMap  map[common.Address]uint64 // Which commit address belong to which map!
+	logdir       string
+	addrShardMap map[common.Address]uint64 // Which commit address belong to which map!
 
 	gLocked       *types.RWLock                      // Currently locked keys, to be used by rs nodes
 	lockedAddrMap map[uint64]map[common.Address]bool // shard: address mapping for locked contracts
@@ -219,7 +217,7 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, gLocked *types.RWLock, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, logdir string) *worker {
+func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(*types.Block) bool, commitments map[uint64]*types.Commitments, gLocked *types.RWLock, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, logdir string) *worker {
 	worker := &worker{
 		config:             config,
 		engine:             engine,
@@ -247,8 +245,6 @@ func newWorker(config *params.ChainConfig, engine consensus.Engine, eth Backend,
 		resubmitIntervalCh: make(chan time.Duration),
 		resubmitAdjustCh:   make(chan *intervalAdjust, resubmitAdjustChanSize),
 		commitments:        commitments,
-		foreignData:        foreignData,
-		foreignDataMu:      foreignDataMu,
 		foreignDataCh:      make(chan core.ForeignDataEvent),
 		gLocked:            gLocked,
 		cLocked:            make(map[common.Address]*types.CLock),
@@ -751,11 +747,9 @@ func (w *worker) resultLoop() {
 			}
 
 			if w.eth.MyShard() == uint64(0) {
-				// Update locked status
-				w.chain.UpdateRefStatus(block, task.receipts)
+				w.chain.UpdateRefStatus(block, task.receipts) // Update locked status
 			} else {
-				// Logging block infomation!
-				w.chain.LogData(true, block, task.receipts)
+				w.chain.LogData(true, block, task.receipts) // Logging block infomation!
 			}
 			log.Info("Successfully sealed new block", "number", block.Number(), "sealhash", sealhash, "hash", hash, "root", block.Root(),
 				"elapsed", common.PrettyDuration(time.Since(task.createdAt)))
@@ -821,6 +815,7 @@ func (w *worker) commitPendingBlock(work uint64, env *environment, dc *types.Dat
 		w.commitPendingTransaction(tx, env, dc)
 		env.tcount++
 	}
+	log.Debug("Finished processing block", "num", work)
 	return nil
 }
 
@@ -987,7 +982,7 @@ func (w *worker) commitInitialContract(coinbase common.Address, interrupt *int32
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		log.Error("Failed to read init-contracts file: %v", err)
+		log.Error("Failed to read init-contracts file", "error", err)
 		return true
 	}
 	defer file.Close()
@@ -1423,9 +1418,10 @@ func (w *worker) NewValidStateCommitments(stateTxs map[common.Address]types.Tran
 		}
 		if maxTx != nil { // Add to new commits
 			newCommits[addr] = types.Transactions{maxTx}
+			_, commit, report, _ := types.DecodeStateCommit(maxTx)
+			log.Debug("Adding state commits", "shard", shard, "report", report, "commit", commit)
 			w.unlockKeys(shard)
 		}
-		delete(stateTxs, addr) // Remove all old commits
 	}
 	return newCommits
 }

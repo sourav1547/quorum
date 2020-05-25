@@ -102,9 +102,6 @@ type ProtocolManager struct {
 	shardAddMap     map[uint64]*big.Int
 	shardAddMapLock sync.RWMutex
 
-	foreignData   map[uint64]*types.DataCache
-	foreignDataMu sync.RWMutex
-
 	SubProtocols []p2p.Protocol
 
 	eventMux      *event.TypeMux
@@ -131,7 +128,7 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, chaindb, refdb ethdb.Database, raftMode bool, logdir string) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, numShard, myshard, networkID uint64, mux, rmux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain, refchain *core.BlockChain, refAddress common.Address, shardAddMap map[uint64]*big.Int, chaindb, refdb ethdb.Database, raftMode bool, logdir string) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		numShard:      numShard,
@@ -148,8 +145,6 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, nu
 		chainconfig:   config,
 		cousinPeers:   make(map[uint64]*peerSet),
 		shardAddMap:   make(map[uint64]*big.Int),
-		foreignData:   foreignData,
-		foreignDataMu: foreignDataMu,
 		newPeerCh:     make(chan *peer),
 		noMorePeers:   make(chan struct{}),
 		txsyncCh:      make(chan *txsync),
@@ -956,12 +951,14 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		refNum := request.RefNum
 		root := request.Root
 		count := request.Count
-		results := pm.blockchain.StateData(root, request.Keys)
 		log.Debug("Received request from", "pshard", p.Shard(), "num", refNum, "root", root)
 
-		err := p.SendDataResponse(refNum, count, root, results)
-		if err != nil {
-			log.Error("Error in send state data response!", "error", err)
+		results := pm.blockchain.StateData(root, request.Keys)
+		if results != nil {
+			err := p.SendDataResponse(refNum, count, root, results)
+			if err != nil {
+				log.Error("Error in send state data response!", "error", err)
+			}
 		}
 
 	case msg.Code == StateDataMsg:
@@ -995,9 +992,7 @@ func (pm *ProtocolManager) Enqueue(id string, block *types.Block) {
 
 // AddFetchedData fills the data cache with data downloaded from peer
 func (pm *ProtocolManager) AddFetchedData(refNum, pshard uint64, vals []*types.KeyVal) {
-	pm.foreignDataMu.RLock()
-	dc := pm.foreignData[refNum]
-	pm.foreignDataMu.RUnlock()
+	dc, _ := pm.blockchain.Dc(refNum)
 	if dc != nil {
 		dc.DataCacheMu.RLock()
 		if !dc.ShardStatus[pshard] {
@@ -1020,15 +1015,7 @@ func (pm *ProtocolManager) AddFetchedData(refNum, pshard uint64, vals []*types.K
 // FetchData requests data from appropriate shard
 func (pm *ProtocolManager) FetchData(start, end uint64) {
 	for refNum := start; refNum <= end; refNum++ {
-
-		pm.foreignDataMu.RLock()
-		dc := pm.foreignData[refNum]
-		pm.foreignDataMu.RUnlock()
-
-		dc.DataCacheMu.RLock()
-		status := dc.Status
-		dc.DataCacheMu.RUnlock()
-
+		dc, status := pm.blockchain.Dc(refNum)
 		if !status {
 			for shard := range dc.ShardStatus {
 				if shard != pm.myshard {
@@ -1044,13 +1031,11 @@ func (pm *ProtocolManager) FetchData(start, end uint64) {
 
 // FetchDataShard sends request for each data
 func (pm *ProtocolManager) FetchDataShard(refNum, shard uint64, root common.Hash) {
-	pm.foreignDataMu.RLock()
-	dc := pm.foreignData[refNum]
-	pm.foreignDataMu.RUnlock()
 	var (
 		keys  []*types.CKeys
 		count uint64
 	)
+	dc, _ := pm.blockchain.Dc(refNum)
 	dc.DataCacheMu.RLock()
 	for addr, lshard := range dc.AddrToShard {
 		if lshard == shard {
@@ -1214,7 +1199,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				start += copy(data[start:], block.Root().Bytes())
 
 				// NewTransaction(txType, nonce, shard, to, amount, gasLimit, gasPrice, data)
-				stateTx := types.NewTransaction(types.StateCommit, block.NumberU64()-1, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
+				stateTx := types.NewTransaction(types.StateCommit, block.RefNumberU64()+block.NumberU64()-1, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
 				var txs []*types.Transaction
 				txs = append(txs, stateTx)
 				pm.cousinPeerLock.RLock()

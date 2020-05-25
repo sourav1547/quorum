@@ -133,6 +133,7 @@ type BlockChain struct {
 	procmu  sync.RWMutex // block processor lock
 	ctxmu   sync.RWMutex // cross-shard trasnaction processor!
 
+	nonce            uint64
 	checkpoint       int          // checkpoint counts towards the new checkpoint
 	currentBlock     atomic.Value // Current head of the block chain
 	currentFastBlock atomic.Value // Current head of the fast-sync chain (may be above the block chain!)
@@ -334,8 +335,8 @@ func (bc *BlockChain) SetCommitAddress(addr common.Address) {
 
 // Dc returns committed data and its current status!
 func (bc *BlockChain) Dc(rnum uint64) (*types.DataCache, bool) {
-	bc.foreignDataMu.Lock()
-	defer bc.foreignDataMu.Unlock()
+	bc.foreignDataMu.RLock()
+	defer bc.foreignDataMu.RUnlock()
 	if dc, dok := bc.foreignData[rnum]; dok {
 		return dc, dc.Status
 	}
@@ -1524,19 +1525,17 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 				}
 			}
 
-			// Parse transactions in reference chain to check for new state commitments
-			if bc.myshard > 0 {
+			// Update the reference status of shards i.e., update which shards committed
+			// new block and for which shard new cross-shard transactions were added!
+			if bc.myshard == uint64(0) {
+				bc.UpdateRefStatus(block, receipts)
+			} else {
+				// Parse transactions in reference chain to check for new state commitments
 				if bc.ref {
 					bc.ParseBlock(block, receipts)
 				} else {
 					bc.LogData(false, block, receipts)
 				}
-			}
-
-			// Update the reference status of shards i.e., update which shards committed
-			// new block and for which shard new cross-shard transactions were added!
-			if bc.myshard == uint64(0) {
-				bc.UpdateRefStatus(block, receipts)
 			}
 
 		case SideStatTy:

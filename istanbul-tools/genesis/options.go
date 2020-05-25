@@ -52,6 +52,9 @@ func Alloc(addrs []common.Address, balance *big.Int, numShard uint64) Option {
 			alloc[addr] = core.GenesisAccount{Balance: balance}
 		}
 
+		if numShard == uint64(1) {
+			numShard = 10
+		}
 		// To allocate balance to shard addresses
 		seed := "6462C73A8D4913910C5AAA748EA82CD67EB4B73D"
 		bigSeed := new(big.Int)

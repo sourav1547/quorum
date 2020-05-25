@@ -20,7 +20,6 @@ package miner
 import (
 	"fmt"
 	"math/big"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -59,13 +58,13 @@ type Miner struct {
 }
 
 // New creates a new miner
-func New(eth Backend, config *params.ChainConfig, mux *event.TypeMux, engine consensus.Engine, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(block *types.Block) bool, commitments map[uint64]*types.Commitments, foreignData map[uint64]*types.DataCache, foreignDataMu sync.RWMutex, gLocked *types.RWLock, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, logdir string) *Miner {
+func New(eth Backend, config *params.ChainConfig, mux *event.TypeMux, engine consensus.Engine, recommit time.Duration, gasFloor, gasCeil uint64, isLocalBlock func(block *types.Block) bool, commitments map[uint64]*types.Commitments, gLocked *types.RWLock, lastCommit map[uint64]*types.Commitment, lastCtx map[uint64]uint64, shardAddMap map[uint64]*big.Int, lockedAddrMap map[uint64]map[common.Address]bool, logdir string) *Miner {
 	miner := &Miner{
 		eth:      eth,
 		mux:      mux,
 		engine:   engine,
 		exitCh:   make(chan struct{}),
-		worker:   newWorker(config, engine, eth, mux, recommit, gasFloor, gasCeil, isLocalBlock, commitments, foreignData, foreignDataMu, gLocked, lastCommit, lastCtx, shardAddMap, lockedAddrMap, logdir),
+		worker:   newWorker(config, engine, eth, mux, recommit, gasFloor, gasCeil, isLocalBlock, commitments, gLocked, lastCommit, lastCtx, shardAddMap, lockedAddrMap, logdir),
 		canStart: 1,
 	}
 	go miner.update()

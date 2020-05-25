@@ -272,11 +272,11 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.refAddress, eth.myShard, eth.shardAddMap, eth.blockchain)
 
-	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.rEventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, eth.foreignData, eth.foreignDataMu, chainDb, refDb, config.RaftMode, eth.logdir); err != nil {
+	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NumShard, config.MyShard, config.NetworkId, eth.eventMux, eth.rEventMux, eth.txPool, eth.engine, eth.blockchain, eth.refchain, eth.refAddress, eth.shardAddMap, chainDb, refDb, config.RaftMode, eth.logdir); err != nil {
 		return nil, err
 	}
 
-	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.foreignData, eth.foreignDataMu, eth.gLocked, eth.lastCommit, eth.lastCtx, eth.shardAddMap, eth.lockedAddrMap, eth.logdir)
+	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock, eth.commitments, eth.gLocked, eth.lastCommit, eth.lastCtx, eth.shardAddMap, eth.lockedAddrMap, eth.logdir)
 	eth.miner.SetExtra(makeExtraData(config.MinerExtraData, eth.chainConfig.IsQuorum))
 
 	hexNodeId := fmt.Sprintf("%x", crypto.FromECDSAPub(&ctx.NodeKey().PublicKey)[1:]) // Quorum
