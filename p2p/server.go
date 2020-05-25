@@ -653,7 +653,8 @@ func (srv *Server) run(dialstate dialer) {
 	var (
 		cousinPeers  = make(map[uint64]map[enode.ID]*Peer)
 		inboundCount = 0
-		trusted      = make(map[enode.ID]bool, len(srv.TrustedNodes))
+		// trusted      = make(map[enode.ID]bool, len(srv.TrustedNodes))
+		trusted      = make(map[enode.ID]bool)
 		taskdone     = make(chan task, maxActiveDialTasks)
 		runningTasks []task
 		queuedTasks  []task // tasks that can't run yet
@@ -662,6 +663,12 @@ func (srv *Server) run(dialstate dialer) {
 	// Trusted peers are loaded on startup or added via AddTrustedPeer RPC.
 	for _, n := range srv.TrustedNodes {
 		trusted[n.ID()] = true
+	}
+
+	for _, nodes := range srv.StaticNodesAll {
+		for _, n := range nodes {
+			trusted[n.ID()] = true
+		}
 	}
 
 	for k := range nodeMapping {
