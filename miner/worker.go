@@ -1446,15 +1446,15 @@ func (w *worker) unlockKeys(shard uint64) {
 func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Transactions) map[common.Address]types.Transactions {
 	// This function assumes thta w.gLocked.Mu lock is already held!
 	var (
-		newCtxs  = make(map[common.Address]types.Transactions)
-		numShard int
-		index    uint64
-		start    = 0
-		others   = 0
-		end      = 0
-		u32      = uint64(32)
-		data     []byte
-		shards   []uint64
+		newCtxs   = make(map[common.Address]types.Transactions)
+		numShards int
+		index     uint64
+		start     = 0
+		others    = 0
+		end       = 0
+		u32       = uint64(32)
+		data      []byte
+		shards    []uint64
 	)
 	for creator, txs := range crossTxs {
 		start += len(txs)
@@ -1471,10 +1471,10 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 
 			data = tx.Data()[4:]
 			index, shards, _ = types.DecodeCrossTx(uint64(0), data) // To remove shard information
-			numShard = len(shards)
+			numShards = len(shards)
 			index = index + u32 + uint64(2) // (index + size of data + numshard)
 			// Fetch all read-write keys of a transaction
-			allKyes, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
+			allKyes, _, _ := types.GetAllRWSet(uint16(numShards), data[index:])
 			// If can inlucde the latest transaction
 			if include := w.checkTxStatus(allKyes); include {
 				if _, cok := newCtxs[creator]; !cok {

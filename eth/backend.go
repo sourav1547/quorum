@@ -191,7 +191,7 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		eventMux:        ctx.EventMux,
 		rEventMux:       ctx.REventMux,
 		accountManager:  ctx.AccountManager,
-		engine:          CreateConsensusEngine(ctx, chainConfig, config, config.MyShard, config.NumShard, config.MinerNotify, config.MinerNoverify, chainDb, refDb),
+		engine:          CreateConsensusEngine(ctx, chainConfig, config, config.MyShard, config.NumShard, config.RefNodes, config.MinerNotify, config.MinerNoverify, chainDb, refDb),
 		shutdownChan:    make(chan bool),
 		numShard:        config.NumShard,
 		myShard:         config.MyShard,
@@ -320,7 +320,7 @@ func CreateDB(ctx *node.ServiceContext, config *Config, name string) (ethdb.Data
 }
 
 // CreateConsensusEngine creates the required type of consensus engine instance for an Ethereum service
-func CreateConsensusEngine(ctx *node.ServiceContext, chainConfig *params.ChainConfig, config *Config, myShard, numShard uint64, notify []string, noverify bool, db, refdb ethdb.Database) consensus.Engine {
+func CreateConsensusEngine(ctx *node.ServiceContext, chainConfig *params.ChainConfig, config *Config, myShard, numShard, refNodes uint64, notify []string, noverify bool, db, refdb ethdb.Database) consensus.Engine {
 	// If proof-of-authority is requested, set it up
 	if chainConfig.Clique != nil {
 		return clique.New(chainConfig.Clique, db)
@@ -333,7 +333,7 @@ func CreateConsensusEngine(ctx *node.ServiceContext, chainConfig *params.ChainCo
 		config.Istanbul.ProposerPolicy = istanbul.ProposerPolicy(chainConfig.Istanbul.ProposerPolicy)
 		config.Istanbul.Ceil2Nby3Block = chainConfig.Istanbul.Ceil2Nby3Block
 
-		return istanbulBackend.New(&config.Istanbul, ctx.NodeKey(), myShard, numShard, db, refdb)
+		return istanbulBackend.New(&config.Istanbul, ctx.NodeKey(), myShard, numShard, refNodes, db, refdb)
 	}
 
 	// Otherwise assume proof-of-work

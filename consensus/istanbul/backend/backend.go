@@ -42,15 +42,16 @@ const (
 )
 
 // New creates an Ethereum backend for Istanbul core engine.
-func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myshard, numShard uint64, db, refdb ethdb.Database) consensus.Istanbul {
+func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myShard, numShard, refNodes uint64, db, refdb ethdb.Database) consensus.Istanbul {
 	// Allocate the snapshot caches and create the engine
 	recents, _ := lru.NewARC(inmemorySnapshots)
 	recentMessages, _ := lru.NewARC(inmemoryPeers)
 	knownMessages, _ := lru.NewARC(inmemoryMessages)
 	backend := &backend{
 		config:           config,
-		myshard:          myshard,
+		myShard:          myShard,
 		numShard:         numShard,
+		refNodes:         refNodes,
 		istanbulEventMux: new(event.TypeMux),
 		privateKey:       privateKey,
 		address:          crypto.PubkeyToAddress(privateKey.PublicKey),
@@ -63,7 +64,7 @@ func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myshard, numShar
 		recentMessages:   recentMessages,
 		knownMessages:    knownMessages,
 	}
-	backend.core = istanbulCore.New(backend, backend.config, myshard, numShard)
+	backend.core = istanbulCore.New(backend, backend.config, myShard, numShard, refNodes)
 	return backend
 }
 
@@ -71,8 +72,9 @@ func New(config *istanbul.Config, privateKey *ecdsa.PrivateKey, myshard, numShar
 
 type backend struct {
 	config           *istanbul.Config
-	myshard          uint64
+	myShard          uint64
 	numShard         uint64
+	refNodes         uint64
 	istanbulEventMux *event.TypeMux
 	privateKey       *ecdsa.PrivateKey
 	address          common.Address
@@ -119,9 +121,14 @@ func (sb *backend) NumShard() uint64 {
 	return sb.numShard
 }
 
+// RefNodes returns the total number of shard
+func (sb *backend) RefNodes() uint64 {
+	return sb.refNodes
+}
+
 // MyShard returns local shard id
 func (sb *backend) MyShard() uint64 {
-	return sb.myshard
+	return sb.myShard
 }
 
 // Validators implements istanbul.Backend.Validators

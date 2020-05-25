@@ -207,7 +207,7 @@ func (sb *backend) verifyCascadingFields(chain consensus.ChainReader, header *ty
 		copy(validators[i*common.AddressLength:], validator[:])
 	}
 
-	ref := header.Shard == uint64(0) && sb.myshard > uint64(0)
+	ref := header.Shard == uint64(0) && sb.myShard > uint64(0)
 	if !ref {
 		if err := sb.verifySigner(chain, header, parents); err != nil {
 			return err
@@ -333,7 +333,7 @@ func (sb *backend) VerifySeal(chain consensus.ChainReader, header *types.Header)
 	if header.Difficulty.Cmp(defaultDifficulty) != 0 {
 		return errInvalidDifficulty
 	}
-	ref := header.Shard == uint64(0) && sb.myshard > uint64(0)
+	ref := header.Shard == uint64(0) && sb.myShard > uint64(0)
 	if !ref {
 		return sb.verifySigner(chain, header, nil)
 	}
@@ -584,9 +584,15 @@ func (sb *backend) snapshot(chain consensus.ChainReader, number uint64, hash com
 			sb.core.SetAllValidators(istanbulExtra.Validators)
 
 			totalValidators := uint64(len(istanbulExtra.Validators))
-			validatorsPerShard := totalValidators / sb.numShard
-			lowIndex := sb.myshard * validatorsPerShard
-			highIndex := (1 + sb.myshard) * validatorsPerShard
+			refValidators := sb.refNodes
+			validatorsPerShard := (totalValidators - refValidators) / (sb.numShard - 1)
+
+			lowIndex := uint64(0)
+			highIndex := refValidators
+			if sb.myShard > uint64(0) {
+				lowIndex = refValidators + (sb.myShard-1)*validatorsPerShard
+				highIndex = lowIndex + validatorsPerShard
+			}
 			istanbulExtra.Validators = istanbulExtra.Validators[lowIndex:highIndex]
 
 			if err != nil {
@@ -625,7 +631,7 @@ func (sb *backend) snapshot(chain consensus.ChainReader, number uint64, hash com
 
 	ref := false
 	if len(headers) > 0 {
-		ref = headers[0].Shard == uint64(0) && sb.myshard > uint64(0)
+		ref = headers[0].Shard == uint64(0) && sb.myShard > uint64(0)
 	}
 
 	snap, err := snap.apply(ref, headers)

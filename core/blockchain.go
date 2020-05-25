@@ -1710,13 +1710,13 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 					bc.lastCtx[shard] = bNum
 				}
 				// Updating global locks based on the new cross-shard transaction
-				numShard := len(shards)
-				index := (2+1+numShard)*elemSize + elemSize + 2
-				allKeys, _, _ := types.GetAllRWSet(uint16(numShard), data[index:])
+				numShards := len(shards)
+				index := (2+1+numShards)*elemSize + elemSize + 2
+				allKeys, _, _ := types.GetAllRWSet(uint16(numShards), data[index:])
 				bc.addNewLocks(allKeys)
 				// Logging data!
 				// Cross-shard transaction file
-				fmt.Fprintln(ctxtimef, bNum, tx.Hash().Hex(), numShard, time.Now().Unix())
+				fmt.Fprintln(ctxtimef, bNum, tx.Hash().Hex(), numShards, time.Now().Unix())
 			} else if txType == types.StateCommit {
 				// Extracting data
 				shard, commit, report, root := types.DecodeStateCommit(tx)

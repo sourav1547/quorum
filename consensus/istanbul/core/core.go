@@ -33,12 +33,13 @@ import (
 )
 
 // New creates an Istanbul consensus core
-func New(backend istanbul.Backend, config *istanbul.Config, myShard, numShard uint64) Engine {
+func New(backend istanbul.Backend, config *istanbul.Config, myShard, numShard, refNodes uint64) Engine {
 	r := metrics.NewRegistry()
 	c := &core{
 		config:             config,
 		myShard:            myShard,
 		numShard:           numShard,
+		refNodes:           refNodes,
 		valSetAll:          make(map[uint64][]common.Address),
 		address:            backend.Address(),
 		state:              StateAcceptRequest,
@@ -69,6 +70,7 @@ type core struct {
 	config   *istanbul.Config
 	myShard  uint64
 	numShard uint64
+	refNodes uint64
 	address  common.Address
 	state    State
 	logger   log.Logger
@@ -109,13 +111,18 @@ func (c *core) SetAllValidators(validators []common.Address) {
 	totalValidators := uint64(len(validators))
 	// numShard := int(c.numShard)
 	// myShard := int(c.myShard)
-	validatorsPerShard := totalValidators / c.numShard
+	refValidators := c.refNodes
+	validatorsPerShard := (totalValidators - refValidators) / (c.numShard - 1)
 
 	for i := uint64(0); i < c.numShard; i++ {
 		c.valSetAll[i] = []common.Address{}
-		for j := uint64(0); j < validatorsPerShard; j++ {
-			c.valSetAll[i] = append(c.valSetAll[i], validators[i*validatorsPerShard+j])
+		start := uint64(0)
+		end := refValidators
+		if i > uint64(0) {
+			start = refValidators + (i-1)*validatorsPerShard
+			end = start + validatorsPerShard
 		}
+		c.valSetAll[i] = append(c.valSetAll[i], validators[start:end]...)
 	}
 }
 

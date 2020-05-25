@@ -667,7 +667,7 @@ func GetRWSet(numContracts uint16, index uint16, data []byte) ([]*CKeys, uint16)
 }
 
 // GetAllRWSet return all read-write set used in a cross-shard transaction
-func GetAllRWSet(numShard uint16, data []byte) (map[uint64][]*CKeys, []uint64, uint16) {
+func GetAllRWSet(numShards uint16, data []byte) (map[uint64][]*CKeys, []uint64, uint16) {
 	var (
 		index        = uint16(0)
 		numContracts uint16
@@ -676,7 +676,7 @@ func GetAllRWSet(numShard uint16, data []byte) (map[uint64][]*CKeys, []uint64, u
 		allContracts = make(map[uint64][]*CKeys) // map shard: {list of addr:keys}
 	)
 
-	for i := uint16(0); i < numShard; i++ {
+	for i := uint16(0); i < numShards; i++ {
 		shard := binary.BigEndian.Uint16(data[index : index+2])
 		shards = append(shards, uint64(shard))
 		index += 2
@@ -691,7 +691,7 @@ func GetAllRWSet(numShard uint16, data []byte) (map[uint64][]*CKeys, []uint64, u
 }
 
 // ParseCrossTxData parsed data
-func ParseCrossTxData(numShard uint16, data []byte) *CrossTx {
+func ParseCrossTxData(numShards uint16, data []byte) *CrossTx {
 	var (
 		index    uint16
 		addrSize = uint16(20)
@@ -705,7 +705,7 @@ func ParseCrossTxData(numShard uint16, data []byte) *CrossTx {
 		Shards:       []uint64{},
 		AllContracts: make(map[uint64][]*CKeys),
 	}
-	ctx.AllContracts, ctx.Shards, index = GetAllRWSet(numShard, data)
+	ctx.AllContracts, ctx.Shards, index = GetAllRWSet(numShards, data)
 
 	sender := common.BytesToAddress(data[index : index+addrSize])
 	index += addrSize
@@ -817,10 +817,10 @@ func (cm *Commitments) GetCommit(shard uint64) *Commitment {
 }
 
 // CopyCommits accross reference numbers
-func (cm *Commitments) CopyCommits(numShard uint64, commits *Commitments) {
+func (cm *Commitments) CopyCommits(numShards uint64, commits *Commitments) {
 	cm.Lock.Lock()
 	defer cm.Lock.Unlock()
-	for shard := uint64(1); shard < numShard; shard++ {
+	for shard := uint64(1); shard < numShards; shard++ {
 		commit := commits.GetCommit(shard)
 		cm.Commits[shard] = &Commitment{
 			RefNum:    commit.RefNum,
