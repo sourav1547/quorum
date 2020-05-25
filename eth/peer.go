@@ -509,6 +509,7 @@ type peerSet struct {
 func newPeerSet() *peerSet {
 	return &peerSet{
 		peers: make(map[string]*peer),
+		lock:  sync.RWMutex{},
 	}
 }
 
