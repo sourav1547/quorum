@@ -863,24 +863,22 @@ func (w *worker) makeCurrent(reorg bool, parent *types.Block, header *types.Head
 		gasPool:      new(core.GasPool).AddGas(w.gasLimit),
 	}
 
-	if reorg {
-		// Start and Ref ref number to process!
-		start := parent.RefNumberU64() + uint64(1)
-		end := header.RefNumber.Uint64()
-		curr := start
-		for curr <= end {
-			dc, status := w.chain.Dc(curr)
-			if !status {
-				select {
-				case <-w.foreignDataCh:
-					continue
-				}
+	// Start and Ref ref number to process!
+	start := parent.RefNumberU64() + uint64(1)
+	end := header.RefNumber.Uint64()
+	curr := start
+	for curr <= end {
+		dc, status := w.chain.Dc(curr)
+		if !status {
+			select {
+			case <-w.foreignDataCh:
+				continue
 			}
-			if err := w.commitPendingBlock(curr, env, dc); err != nil {
-				return err
-			}
-			curr++
 		}
+		if err := w.commitPendingBlock(curr, env, dc); err != nil {
+			return err
+		}
+		curr++
 	}
 	// when 08 is processed ancestors contain 07 (quick block)
 	for _, ancestor := range w.chain.GetBlocksFromHash(parent.Hash(), 7) {

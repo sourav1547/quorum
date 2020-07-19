@@ -976,7 +976,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		if err != nil {
 			log.Error("Can't open dresp file", "error", err)
 		}
-		fmt.Fprintln(drespf, refNum, p.Shard(), len(vals), root.Hex(), p.ID(), time.Now())
+		fmt.Fprintln(drespf, refNum, p.Shard(), len(vals), root.Hex(), p.ID(), time.Now().Unix())
 		drespf.Close()
 		go pm.AddFetchedData(refNum, p.Shard(), vals)
 
