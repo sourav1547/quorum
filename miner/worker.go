@@ -494,6 +494,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 					// engine, iff chain reorganization is required.
 					// Otherwise, the new commit procedure will work
 					// as it is.
+					time.Sleep(2 * time.Second) // Sleep for 2.5 seconds to break the periodic nature of block reoganization
 					commit(false, reorg, commitInterruptNewHead)
 				}
 			}
@@ -1397,7 +1398,7 @@ func (w *worker) NewValidStateCommitments(stateTxs map[common.Address]types.Tran
 
 		// Itereate through all state commits
 		for _, tx := range txs {
-			_, commit, report, _ := types.DecodeStateCommit(tx)
+			_, commit, report, _, _ := types.DecodeStateCommit(tx)
 			// Only accept if no new cross-shard transactions are added after reproted block!
 			if report >= lastCtx {
 				if report > maxRef {
@@ -1416,7 +1417,7 @@ func (w *worker) NewValidStateCommitments(stateTxs map[common.Address]types.Tran
 		}
 		if maxTx != nil { // Add to new commits
 			newCommits[addr] = types.Transactions{maxTx}
-			_, commit, report, _ := types.DecodeStateCommit(maxTx)
+			_, commit, report, _, _ := types.DecodeStateCommit(maxTx)
 			log.Debug("Adding state commits", "shard", shard, "report", report, "commit", commit)
 			w.unlockKeys(shard)
 		}
@@ -1454,6 +1455,13 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 		data      []byte
 		shards    []uint64
 	)
+	// Opening the file to log attempted transactions
+	attempt := w.logdir + "attempt"
+	attemptf, err := os.OpenFile(attempt, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error("Can't open rtime file", "error", err)
+	}
+
 	for creator, txs := range crossTxs {
 		start += len(txs)
 		for _, tx := range txs {
@@ -1474,7 +1482,8 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 			// Fetch all read-write keys of a transaction
 			allKyes, _, _ := types.GetAllRWSet(uint16(numShards), data[index:])
 			// If can inlucde the latest transaction
-			if include := w.checkTxStatus(allKyes); include {
+			include := false
+			if include = w.checkTxStatus(allKyes); include {
 				if _, cok := newCtxs[creator]; !cok {
 					newCtxs[creator] = types.Transactions{}
 				}
@@ -1482,8 +1491,13 @@ func (w *worker) NewValidCrossTransactions(crossTxs map[common.Address]types.Tra
 				end = end + 1
 				w.updateLockStatus(allKyes)
 			}
+
+			// The transaction can not be included due to conflict.
+			fmt.Fprintln(attemptf, tx.Hash().Hex(), include, time.Now().Unix())
 		}
 	}
+	// Closing the file
+	attemptf.Close()
 	log.Info("@ctx, Returning NewValidCrossTransactions", "start", start, "end", end, "others", others)
 	return newCtxs
 }

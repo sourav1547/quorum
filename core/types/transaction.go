@@ -753,7 +753,7 @@ func DecodeCrossTx(myshard uint64, data []byte) (uint64, []uint64, bool) {
 }
 
 // DecodeStateCommit returns the commiitted block num, reproted rs block num
-func DecodeStateCommit(stx *Transaction) (uint64, uint64, uint64, common.Hash) {
+func DecodeStateCommit(stx *Transaction) (uint64, uint64, uint64, common.Hash, common.Hash) {
 	var (
 		u32    = 32
 		u24    = 24
@@ -762,6 +762,7 @@ func DecodeStateCommit(stx *Transaction) (uint64, uint64, uint64, common.Hash) {
 		report uint64
 		shard  uint64
 		root   common.Hash
+		bHash  common.Hash
 	)
 	data := stx.Data()[4:]
 	shard = binary.BigEndian.Uint64(data[index+u24 : index+u32])
@@ -770,8 +771,10 @@ func DecodeStateCommit(stx *Transaction) (uint64, uint64, uint64, common.Hash) {
 	index += u32
 	report = binary.BigEndian.Uint64(data[index+u24 : index+u32])
 	index += u32
-	root = common.BytesToHash(data[index:])
-	return shard, commit, report, root
+	root = common.BytesToHash(data[index : index+u32])
+	index += u32
+	bHash = common.BytesToHash(data[index:])
+	return shard, commit, report, root, bHash
 }
 
 // Commitment of a particular shard
@@ -780,13 +783,15 @@ type Commitment struct {
 	BlockNum  uint64
 	RefNum    uint64
 	StateRoot common.Hash
+	BHash     common.Hash
 }
 
 // Update commitment contents
-func (cmt *Commitment) Update(blockNum, refNum uint64, root common.Hash) {
+func (cmt *Commitment) Update(blockNum, refNum uint64, root, bHash common.Hash) {
 	cmt.BlockNum = blockNum
 	cmt.RefNum = refNum
 	cmt.StateRoot = root
+	cmt.BHash = bHash
 }
 
 // Commitments of all the shards
@@ -825,6 +830,7 @@ func (cm *Commitments) CopyCommits(numShards uint64, commits *Commitments) {
 		cm.Commits[shard] = &Commitment{
 			RefNum:    commit.RefNum,
 			StateRoot: commit.StateRoot,
+			BHash:     commit.BHash,
 			BlockNum:  commit.BlockNum,
 			Shard:     shard,
 		}

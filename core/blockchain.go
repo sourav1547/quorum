@@ -227,6 +227,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 
 	refNum := uint64(0)
 	genRoot := bc.genesisBlock.Root()
+	genHash := bc.genesisBlock.Hash()
 	bc.gLocked.Mu.Lock()
 	if bc.myshard == 0 && !bc.ref {
 		// Initialize commit for every shard!
@@ -239,6 +240,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 				BlockNum:  uint64(0),
 				RefNum:    uint64(0),
 				StateRoot: genRoot,
+				BHash:     genHash,
 			}
 		}
 	} else {
@@ -254,6 +256,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 					BlockNum:  uint64(0),
 					RefNum:    uint64(0),
 					StateRoot: genRoot,
+					BHash:     genHash,
 				}
 				bc.commitments[refNum].AddCommit(shard, commit)
 			}
@@ -1612,11 +1615,12 @@ func (bc *BlockChain) LogData(self bool, block *types.Block, receipts types.Rece
 	bNum := block.NumberU64()
 	rNum := block.RefNumberU64()
 	txs := block.Transactions()
+	bHash := block.Hash().Hex()
 	var txLen = 0
 	for i, tx := range txs {
 		receipt := receipts[i]
 		txLen++
-		fmt.Fprintln(ltdataf, bNum, rNum, tx.Hash().Hex(), tx.TxType(), receipt.Status, receipt.GasUsed, time.Now().Unix())
+		fmt.Fprintln(ltdataf, bNum, bHash, rNum, tx.Hash().Hex(), tx.TxType(), receipt.Status, receipt.GasUsed, time.Now().Unix())
 		if tx.TxType() == types.CrossShardLocal {
 			fmt.Fprintln(csltimef, bNum, tx.Hash().Hex(), time.Now().Unix())
 		}
@@ -1719,7 +1723,7 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 				fmt.Fprintln(ctxtimef, bNum, tx.Hash().Hex(), numShards, time.Now().Unix())
 			} else if txType == types.StateCommit {
 				// Extracting data
-				shard, commit, report, root := types.DecodeStateCommit(tx)
+				shard, commit, report, root, bHash := types.DecodeStateCommit(tx)
 				// Unlocking keys due to state commit
 				lockedAddrs, sok := bc.lockedAddrMap[shard]
 				log.Debug("Unlocking locked keys!", "len", len(lockedAddrs))
@@ -1732,8 +1736,8 @@ func (bc *BlockChain) UpdateRefStatus(block *types.Block, receipts types.Receipt
 				// Updating the latest commit of a shard
 				lcommit := bc.lastCommit[shard]
 				if report >= lcommit.RefNum {
-					bc.lastCommit[shard] = &types.Commitment{Shard: shard, BlockNum: commit, RefNum: report, StateRoot: root} // Update last commit of a shard!
-					fmt.Fprintln(sctimef, shard, commit, report, root.Hex(), tx.Hash().Hex(), time.Now().Unix())
+					bc.lastCommit[shard] = &types.Commitment{Shard: shard, BlockNum: commit, RefNum: report, StateRoot: root, BHash: bHash} // Update last commit of a shard!
+					fmt.Fprintln(sctimef, shard, commit, report, root.Hex(), bHash.Hex(), tx.Hash().Hex(), time.Now().Unix())
 				}
 			}
 		}
@@ -1828,17 +1832,17 @@ func (bc *BlockChain) ParseBlock(block *types.Block, receipts types.Receipts) {
 					fmt.Fprintln(ctxtimef, refNum, tx.Hash().Hex(), crossTx.Tx.Hash().Hex(), numShards, time.Now().Unix())
 				}
 			} else if tx.TxType() == types.StateCommit {
-				shard, commit, report, root := types.DecodeStateCommit(tx)
+				shard, commit, report, root, bHash := types.DecodeStateCommit(tx)
 				if shard == bc.myshard {
-					bc.myLatestCommit.Update(commit, report, root)
-					log.Info("Updated Latest commit", "commit", commit, "report", report, "reporting", refNum, "root", root)
+					bc.myLatestCommit.Update(commit, report, root, bHash)
+					log.Info("Updated Latest commit", "commit", commit, "report", report, "reporting", refNum, "root", root, "bHash", bHash)
 					bc.CleanPendingTx(report)
 				} else {
-					tcommit := &types.Commitment{Shard: shard, BlockNum: commit, RefNum: report, StateRoot: root}
+					tcommit := &types.Commitment{Shard: shard, BlockNum: commit, RefNum: report, StateRoot: root, BHash: bHash}
 					bc.commitments[refNum].AddCommit(shard, tcommit)
 					log.Debug("New commit added for ", "shard", shard, "committed", commit, "reporting", refNum, "root", root)
 				}
-				fmt.Fprintln(sctimef, shard, commit, report, root.Hex(), tx.Hash().Hex(), time.Now().Unix())
+				fmt.Fprintln(sctimef, shard, commit, report, root.Hex(), bHash.Hex(), tx.Hash().Hex(), time.Now().Unix())
 			}
 		} else {
 			log.Info("Unsuccesful transaction execution!", "status", receipt.Status, "event", eventOutput, "txType", tx.TxType(), "hash", tx.Hash())

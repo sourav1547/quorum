@@ -637,15 +637,10 @@ func getBalance(env *EVM, addr common.Address) (*big.Int, error) {
 				}
 			}
 			balance := env.dcChanges[addr].Balance
-			log.Debug("@ds returning balance from cache", "addr", addr, "bal", balance)
 			return new(big.Int).SetUint64(balance), nil
 		}
 	}
 	state := getDualState(env, addr)
-	balance := state.GetBalance(addr).Uint64()
-	if env.Context.Shard > uint64(0) {
-		log.Debug("@ds returning balance from state", "dc", env.dc, "addr", addr, "balance", balance)
-	}
 	return state.GetBalance(addr), nil
 }
 
@@ -658,7 +653,6 @@ func setState(env *EVM, addr common.Address, loc, val common.Hash) error {
 			sok   bool
 		)
 		if shard, sok = env.dc.AddrToShard[addr]; !sok {
-			log.Debug("@ds setState ErrAddressNotFound")
 			return ErrAddressNotFound
 		}
 		if shard != env.Context.Shard {
@@ -672,12 +666,8 @@ func setState(env *EVM, addr common.Address, loc, val common.Hash) error {
 				}
 			}
 			env.dcChanges[addr].Data[loc] = val
-			log.Debug("@ds updating state in cache ", "addr", addr, "loc", loc, "val", val)
 			return nil
 		}
-	}
-	if env.Context.Shard > uint64(0) {
-		log.Debug("@ds updating state in state", "dc", env.dc, "addr", addr, "loc", loc, "val", val)
 	}
 	getDualState(env, addr).SetState(addr, loc, val)
 	return nil
@@ -692,7 +682,6 @@ func getStateAt(env *EVM, addr common.Address, loc common.Hash) (common.Hash, er
 			sok   bool
 		)
 		if shard, sok = env.dc.AddrToShard[addr]; !sok {
-			log.Debug("@ds returning 1 ErrAddressNotFound")
 			return common.Hash{}, ErrAddressNotFound
 		}
 		if shard != env.Context.Shard {
@@ -706,15 +695,11 @@ func getStateAt(env *EVM, addr common.Address, loc common.Hash) (common.Hash, er
 				}
 			}
 			val := env.dcChanges[addr].Data[loc]
-			log.Debug("@ds returning state from cache", "addr", addr, "loc", loc, "val", val)
 			return val, nil
 		}
 	}
 	state := getDualState(env, addr)
 	val := state.GetState(addr, loc)
-	if env.Context.Shard > uint64(0) {
-		log.Debug("@ds returning state from state", "dc", env.dc, "addr", addr, "loc", loc, "val", val)
-	}
 	return val, nil
 }
 

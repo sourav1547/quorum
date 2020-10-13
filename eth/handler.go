@@ -1189,7 +1189,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				binary.BigEndian.PutUint64(refBlkNumByte[24:], block.RefNumberU64())
 
 				var start int
-				dataLen := 4*32 + 4
+				dataLen := 5*32 + 4
 				data := make([]byte, dataLen)
 				funcAddress, _ := hex.DecodeString("8a31297a")
 				start += copy(data[start:], funcAddress)
@@ -1197,6 +1197,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 				start += copy(data[start:], blkNumByte)
 				start += copy(data[start:], refBlkNumByte)
 				start += copy(data[start:], block.Root().Bytes())
+				start += copy(data[start:], block.Hash().Bytes())
 
 				// NewTransaction(txType, nonce, shard, to, amount, gasLimit, gasPrice, data)
 				stateTx := types.NewTransaction(types.StateCommit, block.RefNumberU64()+block.NumberU64()-1, pm.myshard, pm.refAddress, big.NewInt(0), pm.stateGasLimit, pm.stateGasPrice, data)
